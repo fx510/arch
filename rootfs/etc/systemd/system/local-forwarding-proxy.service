@@ -1,0 +1,29 @@
+[Unit]
+Description=Forward proxy using Glider
+After=network.target nftables.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+Group=allow-internet
+Restart=always
+LimitNOFILE=102400
+ExecStart=/usr/bin/glider -listen http://127.0.0.1:8080
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

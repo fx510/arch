@@ -1,0 +1,20 @@
+#!/bin/bash
+# Check if system needs reboot after kernel or library updates
+
+# Check if running kernel matches installed kernel
+CURRENT_KERNEL=$(uname -r)
+INSTALLED_KERNEL=$(pacman -Q linux-hardened | awk '{print $2}' | sed 's/-[0-9]*$//')
+
+if [ "$CURRENT_KERNEL" != "$INSTALLED_KERNEL" ]; then
+    echo "NOTIFY {\"urgency\": \"critical\", \"title\": \"REBOOT REQUIRED\", \"body\": \"Kernel updated: $CURRENT_KERNEL -> $INSTALLED_KERNEL\"}"
+    exit 0
+fi
+
+# Check for processes using deleted libraries
+if [ -x /usr/bin/lsof ]; then
+    DELETED_LIBS=$(lsof +c 0 2>/dev/null | grep -w DEL | grep -w lib | wc -l)
+    
+    if [ "$DELETED_LIBS" -gt 0 ]; then
+        echo "NOTIFY {\"urgency\": \"normal\", \"title\": \"REBOOT RECOMMENDED\", \"body\": \"$DELETED_LIBS processes using old libraries. Consider rebooting.\"}"
+    fi
+fi

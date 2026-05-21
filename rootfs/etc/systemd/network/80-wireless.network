@@ -1,0 +1,15 @@
+[Match]
+Type=wlan
+
+[Network]
+DHCP=ipv4
+
+# Use DHCP-provided DNS servers
+# DNSDefaultRoute=true (default behavior)
+
+# Use DNS over TLS when available
+DNSOverTLS=opportunistic
+
+[DHCPv4]
+RouteMetric=600
+UseDNS=yes

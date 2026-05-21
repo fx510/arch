@@ -1,0 +1,81 @@
+PROXY CONTROL - Quick Reference
+
+═══════════════════════════════════════════════════════════════
+
+DEFAULT SETUP (After Installation):
+  ✓ Direct mode (FAST) - pacman goes directly to internet
+  ✓ Psiphon VPN available but NOT used by default
+  ✓ You control when to use VPN
+
+═══════════════════════════════════════════════════════════════
+
+USAGE:
+
+1. Check current mode:
+   $ proxy-mode status
+
+2. Use DIRECT mode (fast, for updates):
+   $ proxy-mode direct
+
+3. Use VPN mode (slow, for privacy):
+   $ proxy-mode vpn
+
+═══════════════════════════════════════════════════════════════
+
+SCENARIOS:
+
+Scenario 1: Fast System Updates (DEFAULT)
+  $ proxy-mode direct
+  $ sudo pacman -Syu
+  → Downloads at full speed
+
+Scenario 2: Private/Censored Network
+  $ proxy-mode vpn
+  $ sudo pacman -Syu
+  → Downloads through Psiphon VPN (slower but private)
+
+Scenario 3: Temporarily Bypass VPN for One Command
+  $ proxy-mode direct
+  $ sudo pacman -Syu
+  $ proxy-mode vpn
+  → Switch back after update
+
+═══════════════════════════════════════════════════════════════
+
+ARCHITECTURE:
+
+Direct Mode (FAST):
+  pacman → proxify → glider:8080 → Internet
+                                    ↑
+                                  DIRECT
+
+VPN Mode (SLOW):
+  pacman → proxify → glider:8080 → psiphon:8081 → Internet
+                                    ↑              ↑
+                                  CHAIN          VPN
+
+═══════════════════════════════════════════════════════════════
+
+MANUAL CONTROL:
+
+Direct mode:
+  $ sudo systemctl enable local-forwarding-proxy.service
+  $ sudo systemctl start local-forwarding-proxy.service
+
+VPN mode:
+  $ sudo systemctl enable psiphon.service
+  $ sudo systemctl start psiphon.service
+  $ sudo systemctl enable local-forwarding-proxy-vpn.service
+  $ sudo systemctl start local-forwarding-proxy-vpn.service
+
+═══════════════════════════════════════════════════════════════
+
+TIPS:
+
+• Use DIRECT mode for system updates (faster)
+• Use VPN mode when on censored/monitored networks
+• VPN adds latency but provides privacy
+• You can switch modes anytime without reboot
+• Firefox/yay also use the same proxy
+
+═══════════════════════════════════════════════════════════════

@@ -1,0 +1,29 @@
+[Unit]
+Description=Run the auditor script to check for system misconfigurations
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+
+# proxify sets HTTP_PROXY — requires local proxy at 127.0.0.1:8080 to be up.
+# If the proxy is not running, network calls (CVE check) will fail.
+ExecStart=/usr/local/bin/proxify /usr/local/bin/auditor
+
+# ---- Sandboxing ----
+# auditor needs root to read /proc, /sys/firmware/efi and walk the filesystem.
+# We cannot use ProtectSystem=strict here as it needs broad read access,
+# but we apply everything that is safe:
+PrivateTmp=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

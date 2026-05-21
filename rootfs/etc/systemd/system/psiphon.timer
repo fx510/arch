@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart Psiphon Service Hourly
+
+[Timer]
+OnUnitActiveSec=1h
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

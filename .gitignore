@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+test/*
+# Archives
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*_extracted/
+
+# Backup files
+*~
+*.bak
+*.backup
+*_back
+*.swp
+*.swo
+
+# Runtime data (should not be in version control)
+rootfs/etc/psiphon/ca.psiphon.PsiphonTunnel.tunnel-core/
+
+# Auto-generated files
+rootfs/etc/resolv.conf
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

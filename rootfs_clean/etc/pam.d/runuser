@@ -1,0 +1,8 @@
+#%PAM-1.0
+# Minimal silent runuser PAM config for programmatic use from system services.
+# Strips all noisy session modules (pam_motd, pam_mail, pam_keyinit,
+# pam_lastlog2, pam_unix) — none are needed when root calls runuser
+# non-interactively from a daemon.
+
+auth     sufficient  pam_rootok.so
+session  required    pam_permit.so

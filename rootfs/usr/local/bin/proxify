@@ -1,0 +1,21 @@
+#!/bin/bash
+proxy="http://127.0.0.1:8080"
+
+echo "Running $1 through local proxy $proxy"
+
+export HTTP_PROXY="$proxy"
+export HTTPS_PROXY="$proxy"
+
+export http_proxy="$proxy"
+export https_proxy="$proxy"
+
+export RSYNC_PROXY="$proxy"
+export rsync_proxy="$proxy"
+
+export FTP_PROXY="$proxy"
+export ftp_proxy="$proxy"
+
+export NO_PROXY="localhost,127.0.0.1,localaddress,.localdomain.com"
+export no_proxy="localhost,127.0.0.1,localaddress,.localdomain.com"
+
+exec "$@"

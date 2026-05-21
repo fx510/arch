@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Function to check if the script is run with root privileges
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Please run this script as root."
+        exit 1
+    fi
+}
+
+disable_usb() {
+    echo "Disabling USB ports..."
+    
+    # Unload drivers for USB 3.0 and USB 2.0/1.1 controllers
+    rmmod xhci_hcd 2>/dev/null && echo "Unloaded xHCI driver (USB 3.0)."
+    rmmod uhci_hcd 2>/dev/null && echo "Unloaded UHCI driver (USB 2.0/1.1)."
+    rmmod ehci_hcd 2>/dev/null && echo "Unloaded EHCI driver (USB 2.0)."
+    
+    echo "USB ports disabled."
+}

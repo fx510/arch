@@ -1,0 +1,68 @@
+## ============================================================
+## auditd noise reduction rules
+## Arch Linux workstation / Hyprland optimized
+## Place early in rules.d before watch/syscall rules
+## ============================================================
+
+## ------------------------------------------------------------
+## BPF / eBPF noise
+## Modern kernels generate many BPF audit events
+## Usually low forensic value on desktops
+## ------------------------------------------------------------
+
+-a always,exclude -F msgtype=BPF
+
+
+## ------------------------------------------------------------
+## PAM / credential management noise
+## Keep USER_START + USER_END for useful session tracking
+## ------------------------------------------------------------
+
+# Redundant PAM account phase
+-a always,exclude -F msgtype=USER_ACCT
+
+# PAM credential refresh/disposal
+-a always,exclude -F msgtype=CRED_REFR
+-a always,exclude -F msgtype=CRED_DISP
+
+
+## ------------------------------------------------------------
+## Crypto chatter
+## SSH/TLS crypto session spam
+## ------------------------------------------------------------
+
+-a always,exclude -F msgtype=CRYPTO_KEY_USER
+-a always,exclude -F msgtype=CRYPTO_SESSION
+
+
+## ------------------------------------------------------------
+## systemd service spam
+## Comment these if you want daemon persistence visibility
+## ------------------------------------------------------------
+
+-a always,exclude -F msgtype=SERVICE_START
+-a always,exclude -F msgtype=SERVICE_STOP
+
+
+## ------------------------------------------------------------
+## Optional TTY exclusion
+## VERY noisy if pam_tty_audit enabled
+## Leave commented unless logs become excessive
+## ------------------------------------------------------------
+
+# -a always,exclude -F msgtype=TTY
+
+
+## ============================================================
+## KEEP THESE FOR FORENSIC VALUE
+## ------------------------------------------------------------
+## USER_START
+## USER_END
+## CRED_ACQ
+##
+## These are useful for:
+## - SSH tracking
+## - login/session timelines
+## - sudo activity
+## - operator attribution
+## ============================================================

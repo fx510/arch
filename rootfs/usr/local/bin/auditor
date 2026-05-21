@@ -1,0 +1,302 @@
+#!/usr/bin/python3 -u
+# coding: utf-8
+
+"""
+Script that looks for security issues on your system and notify you.
+"""
+
+import json
+import os
+import shutil
+import sys
+from stat import S_ISDIR, S_ISREG, S_IRWXO, S_IWOTH, S_IXOTH
+from subprocess import check_output
+from typing import List, Tuple
+
+import requests
+
+
+def check_world_writable(
+    top_folder: str,
+    dangerous_files_detected: List[str],
+) -> None:
+    try:
+        directories = os.listdir(top_folder)
+    except (PermissionError, FileNotFoundError):
+        return
+
+    if top_folder == "/":
+        for skip_dir in ["proc", "sys", ".snapshots", "dev", "run", "tmp"]:
+            if skip_dir in directories:
+                directories.remove(skip_dir)
+
+    for file in directories:
+        fullpath = os.path.join(top_folder, file)
+
+        try:
+            if os.path.ismount(fullpath):
+                continue
+
+            mode = os.lstat(fullpath).st_mode
+
+        except (PermissionError, FileNotFoundError):
+            continue
+
+        if S_ISDIR(mode) and mode & S_IXOTH:
+            check_world_writable(fullpath, dangerous_files_detected)
+
+        elif S_ISREG(mode) and mode & S_IWOTH:
+            dangerous_files_detected.append(fullpath)
+
+
+def check_homes_permission() -> List[str]:
+    homes_with_wrong_perm = []
+    home_folder = "/home"
+
+    if os.path.isdir(home_folder):
+        for user in os.listdir(home_folder):
+            fullpath = os.path.join(home_folder, user)
+
+            try:
+                mode = os.stat(fullpath).st_mode
+            except (PermissionError, FileNotFoundError):
+                continue
+
+            if mode & S_IRWXO:
+                homes_with_wrong_perm.append(fullpath)
+
+    try:
+        if os.stat("/root").st_mode & S_IRWXO:
+            homes_with_wrong_perm.append("/root")
+    except (PermissionError, FileNotFoundError):
+        pass
+
+    return homes_with_wrong_perm
+
+
+def check_docker() -> List[str]:
+    docker_users = []
+    docker_line = None
+
+    with open("/etc/group") as file:
+        for line in file:
+            if line.startswith("docker:"):
+                docker_line = line.strip()
+                break
+
+    if docker_line:
+        tokens = docker_line.split(":")
+
+        if tokens[-1]:
+            docker_users = tokens[-1].split(",")
+
+    return docker_users
+
+
+def check_secure_boot() -> bool:
+    efivars = "/sys/firmware/efi/efivars"
+
+    if not os.path.isdir(efivars):
+        return False
+
+    sb_file = None
+
+    for file in os.listdir(efivars):
+        if file.startswith("SecureBoot-"):
+            sb_file = f"{efivars}/{file}"
+            break
+
+    if sb_file is None:
+        return False
+
+    with open(sb_file, "rb") as stream:
+        content = stream.read()
+
+    return len(content) > 4 and content[4] == 1
+
+
+def vercmp(ver1: str, ver2: str) -> int:
+    return int(
+        check_output(
+            ["/usr/bin/vercmp", ver1, ver2],
+        ).decode().strip()
+    )
+
+
+def check_local_cves() -> List[Tuple[str, str]]:
+    # This check is Arch Linux specific (requires pacman + vercmp).
+    # Gracefully skip on other distributions.
+    if not shutil.which("pacman") or not shutil.which("vercmp"):
+        return []
+
+    local_cves = []
+    cves_to_ignore = []
+
+    try:
+        with open("/etc/cve-ignore.list", "r") as file:
+            for line in file:
+                cve_to_ignore = line
+
+                comment_index = line.find("#")
+
+                if comment_index != -1:
+                    cve_to_ignore = cve_to_ignore[:comment_index]
+
+                cve_to_ignore = cve_to_ignore.strip()
+
+                if cve_to_ignore:
+                    cves_to_ignore.append(cve_to_ignore)
+
+    except FileNotFoundError:
+        pass
+
+    output = check_output(
+        ["/usr/bin/pacman", "-Qn"]
+    ).decode().splitlines()
+
+    installed_packages = {}
+
+    for line in output:
+        tokens = line.split()
+
+        if len(tokens) != 2:
+            continue
+
+        installed_packages[tokens[0]] = tokens[1]
+
+    response = requests.get(
+        "https://security.archlinux.org/issues/all.json",
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    for entry in response.json():
+        impacted_packages = entry.get("packages", [])
+        affected_version = entry.get("affected")
+        fixed_in_version = entry.get("fixed")
+        cves = entry.get("issues", [])
+
+        cves = [cve for cve in cves if cve not in cves_to_ignore]
+
+        if not cves:
+            continue
+
+        if len(cves) > 5:
+            cves = cves[:4] + ["and more..."]
+
+        cves_text = " ".join(cves)
+
+        for package in impacted_packages:
+            if package not in installed_packages:
+                continue
+
+            installed_version = installed_packages[package]
+
+            if fixed_in_version:
+                if vercmp(fixed_in_version, installed_version) > 0:
+                    local_cves.append((package, cves_text))
+
+            elif affected_version and installed_version == affected_version:
+                local_cves.append((package, cves_text))
+
+    return local_cves
+
+
+def report(
+    title: str,
+    body: str,
+    urgency: str = "critical",
+) -> None:
+    print(
+        "NOTIFY",
+        json.dumps(
+            {
+                "urgency": urgency,
+                "title": title,
+                "body": body,
+            }
+        ),
+    )
+
+
+def main() -> None:
+    if os.geteuid() != 0:
+        print("This script must be run as root.")
+        sys.exit(1)
+
+    report(
+        "AUDIT IN PROGRESS",
+        "The auditor script is looking for security issues...",
+        urgency="normal",
+    )
+
+    print("Checking home folders permissions...")
+    too_permissive_homes_perm = check_homes_permission()
+
+    if too_permissive_homes_perm:
+        report(
+            "DANGEROUS PERMISSIONS DETECTED",
+            "\nThe following home folders are at risk:\n\n"
+            + "\n".join(too_permissive_homes_perm),
+        )
+
+    print("Checking docker group...")
+    people_in_docker_group = check_docker()
+
+    if people_in_docker_group:
+        report(
+            "DANGEROUS GROUP DETECTED",
+            "\nThe following users are in the docker group:\n\n"
+            + "\n".join(people_in_docker_group),
+        )
+
+    print("Checking secure boot...")
+
+    if not check_secure_boot():
+        report(
+            "SECURE BOOT DISABLED",
+            "Make sure to enable it in your BIOS",
+        )
+
+    print("Checking local CVEs...")
+
+    try:
+        packages_with_cve = check_local_cves()
+
+        if packages_with_cve:
+            report(
+                "VULNERABLE PACKAGES DETECTED",
+                "\nThe following packages are vulnerable:\n\n"
+                + "\n\n".join(
+                    [f"{p[0]}: {p[1]}" for p in packages_with_cve]
+                ),
+            )
+
+    except requests.RequestException as exc:
+        report(
+            "CVE CHECK FAILED",
+            str(exc),
+        )
+
+    world_writable_files = []
+
+    print("Checking world writable files...")
+    # NOTE: This walks the entire filesystem from / and can take several minutes
+    # on large systems. The auditor.service runs weekly (low urgency).
+    # If I/O impact is a concern, consider prepending 'ionice -c 3' to the
+    # ExecStart in auditor.service to run at idle I/O priority.
+    # check_world_writable("/", world_writable_files)
+
+    if world_writable_files:
+        report(
+            "DANGEROUS PERMISSIONS DETECTED",
+            "\nAnyone can write to those files:\n\n"
+            + "\n".join(world_writable_files),
+        )
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Check if the script is run as root
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root" 
+   exit 1
+fi
+
+echo "Enabling USB Ports..."
+
+# Re-enable all USB devices by writing '1' to the 'authorized' file
+for usb in /sys/bus/usb/devices/usb*; do
+  echo 1 > "$usb/authorized"
+done
+
+echo "USB Ports Enabled."

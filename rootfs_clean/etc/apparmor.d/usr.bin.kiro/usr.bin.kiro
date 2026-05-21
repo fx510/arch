@@ -1,0 +1,136 @@
+#include <tunables/global>
+
+profile kiro /usr/bin/kiro flags=(attach_disconnected,mediate_deleted) {
+
+  #include <abstractions/base>
+  #include <abstractions/fonts>
+  #include <abstractions/nameservice>
+
+  ##################################################
+  # Application
+  ##################################################
+
+  /usr/bin/kiro ix,
+  /usr/lib/** rm,
+  /usr/share/** r,
+
+  ##################################################
+  # User files
+  ##################################################
+
+  owner @{HOME}/Projects/** rwk,
+  owner @{HOME}/Documents/** rwk,
+  owner @{HOME}/Downloads/** rwk,
+
+  ##################################################
+  # Deny secrets
+  ##################################################
+
+  deny @{HOME}/.ssh/** rwklx,
+  deny @{HOME}/.gnupg/** rwklx,
+  deny @{HOME}/.config/Bitwarden/** rwklx,
+  deny @{HOME}/.aws/** rwklx,
+  deny @{HOME}/.kube/** rwklx,
+
+  ##################################################
+  # BLOCK HARDWARE ENUMERATION
+  ##################################################
+
+  deny /sys/** r,
+  deny /sys/class/** r,
+  deny /sys/devices/** r,
+  deny /sys/firmware/** r,
+
+  deny /sys/class/dmi/id/** r,
+  deny /sys/devices/virtual/dmi/id/** r,
+
+  ##################################################
+  # BLOCK CPU / MEMORY INFO
+  ##################################################
+
+  deny /proc/cpuinfo r,
+  deny /proc/meminfo r,
+  deny /proc/modules r,
+  deny /proc/ioports r,
+  deny /proc/iomem r,
+
+  ##################################################
+  # BLOCK PROCESS ENUMERATION
+  ##################################################
+
+  deny /proc/*/cmdline r,
+  deny /proc/*/maps r,
+  deny /proc/*/environ r,
+  deny /proc/*/status r,
+  deny /proc/*/mem rw,
+
+  ##################################################
+  # BLOCK MACHINE ID
+  ##################################################
+
+  deny /etc/machine-id r,
+  deny /var/lib/dbus/machine-id r,
+
+  ##################################################
+  # BLOCK TPM
+  ##################################################
+
+  deny /dev/tpm0 rw,
+  deny /dev/tpmrm0 rw,
+
+  ##################################################
+  # BLOCK GPU ENUMERATION
+  ##################################################
+
+  deny /dev/dri/** rw,
+
+  ##################################################
+  # BLOCK USB ENUMERATION
+  ##################################################
+
+  deny /sys/bus/usb/** r,
+
+  ##################################################
+  # BLOCK DISK SERIAL ACCESS
+  ##################################################
+
+  deny /dev/disk/** r,
+  deny /sys/block/** r,
+
+  ##################################################
+  # BLOCK HOSTNAME
+  ##################################################
+
+  deny /proc/sys/kernel/hostname r,
+
+  ##################################################
+  # Prevent tracing
+  ##################################################
+
+  deny ptrace,
+
+  ##################################################
+  # Capabilities
+  ##################################################
+
+  deny capability sys_admin,
+  deny capability sys_ptrace,
+  deny capability sys_module,
+  deny capability sys_rawio,
+
+  ##################################################
+  # Network
+  ##################################################
+
+  network inet tcp,
+  network inet udp,
+  deny network raw,
+
+  ##################################################
+  # Temp
+  ##################################################
+
+  owner /tmp/** rw,
+  owner /var/tmp/** rw,
+
+}

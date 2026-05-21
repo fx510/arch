@@ -1,0 +1,38 @@
+[Unit]
+Description=Monitor /var/log/audit/audit.log and emit desktop notifications for security events
+# Ensure auditd is running and has created the log file before we start
+After=auditd.service
+Requires=auditd.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/auditd-notify
+Restart=on-failure
+RestartSec=3s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+
+# strict > full: also makes / and /usr read-only (script only reads logs)
+ProtectSystem=strict
+ReadOnlyPaths=/var/log/audit
+
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+
+ProtectProc=invisible
+ProcSubset=pid
+
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+# Fixed: was 'multi-user.targets' (invalid — trailing 's' caused silent enable failure)
+WantedBy=multi-user.target

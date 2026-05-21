@@ -1,0 +1,27 @@
+#!/bin/bash
+# /usr/local/bin/notify-disk-error
+# Called by auditd via disk_error_action = exec ...
+#
+# NOTE: When auditd calls this via 'exec', stdout is not monitored by
+# auditd-notify. We use multiple delivery methods to ensure the alert lands.
+
+MSG="Critical disk I/O error detected on audit partition. Check: journalctl -xe"
+
+# 1. Broadcast to all logged-in terminal users
+wall "[AUDITD] DISK ERROR: $MSG"
+
+# 2. Write to kernel log (visible in dmesg and journald)
+logger -p daemon.crit -t auditd-disk-error "$MSG"
+
+# 3. Desktop notification for each active graphical session
+who | awk '{print $1}' | sort -u | while read -r user; do
+    uid=$(id -u "$user" 2>/dev/null) || continue
+    dbus_addr=$(cat "/proc/$(pgrep -u "$uid" dbus-daemon | head -1)/environ" 2>/dev/null \
+        | tr '\0' '\n' | grep DBUS_SESSION_BUS_ADDRESS | cut -d= -f2-)
+
+    if [ -n "$dbus_addr" ]; then
+        sudo -u "$user" \
+            DBUS_SESSION_BUS_ADDRESS="$dbus_addr" \
+            notify-send -u critical -t 0 "DISK ERROR DETECTED" "$MSG" 2>/dev/null
+    fi
+done

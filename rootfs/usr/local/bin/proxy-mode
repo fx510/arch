@@ -1,0 +1,89 @@
+#!/bin/bash
+# Switch between direct and VPN proxy modes
+
+set -euo pipefail
+
+show_status() {
+    echo "=========================================="
+    echo "  Proxy Mode Status"
+    echo "=========================================="
+    echo ""
+    
+    if systemctl is-active --quiet local-forwarding-proxy.service; then
+        echo "✓ Direct mode (FAST) - Active"
+        echo "  pacman → glider → Internet"
+    else
+        echo "○ Direct mode - Inactive"
+    fi
+    
+    echo ""
+    
+    if systemctl is-active --quiet local-forwarding-proxy-vpn.service; then
+        echo "✓ VPN mode (SLOW) - Active"
+        echo "  pacman → glider → Psiphon VPN → Internet"
+    else
+        echo "○ VPN mode - Inactive"
+    fi
+    
+    echo ""
+    
+    if systemctl is-active --quiet psiphon.service; then
+        echo "✓ Psiphon VPN - Running"
+    else
+        echo "○ Psiphon VPN - Stopped"
+    fi
+    
+    echo ""
+}
+
+switch_to_direct() {
+    echo "Switching to DIRECT mode (fast)..."
+    sudo systemctl stop local-forwarding-proxy-vpn.service 2>/dev/null || true
+    sudo systemctl disable local-forwarding-proxy-vpn.service 2>/dev/null || true
+    sudo systemctl enable local-forwarding-proxy.service
+    sudo systemctl start local-forwarding-proxy.service
+    echo "✓ Switched to direct mode"
+}
+
+switch_to_vpn() {
+    echo "Switching to VPN mode (slow, private)..."
+    
+    # Check if Psiphon is running
+    if ! systemctl is-active --quiet psiphon.service; then
+        echo "Starting Psiphon VPN..."
+        sudo systemctl enable psiphon.service
+        sudo systemctl start psiphon.service
+        sleep 3
+    fi
+    
+    sudo systemctl stop local-forwarding-proxy.service 2>/dev/null || true
+    sudo systemctl disable local-forwarding-proxy.service 2>/dev/null || true
+    sudo systemctl enable local-forwarding-proxy-vpn.service
+    sudo systemctl start local-forwarding-proxy-vpn.service
+    echo "✓ Switched to VPN mode"
+}
+
+case "${1:-status}" in
+    status)
+        show_status
+        ;;
+    direct|fast)
+        switch_to_direct
+        echo ""
+        show_status
+        ;;
+    vpn|slow|private)
+        switch_to_vpn
+        echo ""
+        show_status
+        ;;
+    *)
+        echo "Usage: proxy-mode [status|direct|vpn]"
+        echo ""
+        echo "Commands:"
+        echo "  status  - Show current proxy mode"
+        echo "  direct  - Use direct connection (fast)"
+        echo "  vpn     - Use VPN connection (slow, private)"
+        exit 1
+        ;;
+esac

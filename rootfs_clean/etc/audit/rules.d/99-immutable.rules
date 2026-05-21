@@ -1,0 +1,4 @@
+# Make auditd rules immutable
+# Enable only after testing rules to avoid reboot sys 
+
+#-e 2

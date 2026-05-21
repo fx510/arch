@@ -1,0 +1,331 @@
+## ============================================================
+## 20-file.rules
+## Arch Linux workstation / Hyprland profile
+##
+## Goals:
+## - low audit noise
+## - low SSD writes
+## - useful forensic visibility
+## - human-focused activity logging
+## - avoid daemon/system spam
+## ============================================================
+
+
+## ============================================================
+## SECTION 1: IDENTITY & AUTHENTICATION
+## ============================================================
+
+# User/group databases
+-w /etc/passwd       -p wa -k identity
+-w /etc/shadow       -p wa -k identity
+-w /etc/group        -p wa -k identity
+-w /etc/gshadow      -p wa -k identity
+
+# sudo configuration
+-w /etc/sudoers      -p wa -k sudo_config
+-w /etc/sudoers.d/   -p wa -k sudo_config
+
+# SSH configuration
+-w /etc/ssh/sshd_config    -p wa -k sshd_config
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd_config
+
+# PAM configuration
+-w /etc/pam.d/ -p wa -k pam_config
+
+# Login tracking
+-w /var/log/faillog   -p wa -k logins
+-w /var/log/lastlog   -p wa -k logins
+-w /var/log/tallylog  -p wa -k logins
+-w /var/run/faillock/ -p wa -k logins
+
+
+## ============================================================
+## SECTION 2: PRIVILEGE ESCALATION
+## ============================================================
+
+# Privileged binaries execution
+-w /usr/bin/sudo    -p x -k privilege_escalation
+-w /usr/bin/su      -p x -k privilege_escalation
+-w /usr/bin/pkexec  -p x -k privilege_escalation
+-w /usr/bin/newgrp  -p x -k privilege_escalation
+-w /usr/bin/chsh    -p x -k privilege_escalation
+-w /usr/bin/chfn    -p x -k privilege_escalation
+
+
+# UID changes (human initiated only)
+-a always,exit -F arch=b64 \
+-S setuid,setreuid,setresuid \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-F exe!=/usr/bin/runuser \
+-k uid_change
+
+-a always,exit -F arch=b32 \
+-S setuid,setreuid,setresuid \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-F exe!=/usr/bin/runuser \
+-k uid_change
+
+
+# GID changes (human initiated only)
+-a always,exit -F arch=b64 \
+-S setgid,setregid,setresgid \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-F exe!=/usr/bin/runuser \
+-k gid_change
+
+-a always,exit -F arch=b32 \
+-S setgid,setregid,setresgid \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-F exe!=/usr/bin/runuser \
+-k gid_change
+
+
+# Human-triggered root commands only
+-a always,exit -F arch=b64 \
+-S execve \
+-F euid=0 \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k root_command
+
+-a always,exit -F arch=b32 \
+-S execve \
+-F euid=0 \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k root_command
+
+
+## ============================================================
+## SECTION 3: SYSTEM INTEGRITY
+## ============================================================
+
+# Kernel modules
+-w /lib/modules/    -p wa -k kernel_modules
+-w /etc/modprobe.d/ -p wa -k kernel_modules
+-w /etc/modules     -p wa -k kernel_modules
+
+# Dynamic linker
+-w /etc/ld.so.conf    -p wa -k ld_so
+-w /etc/ld.so.conf.d/ -p wa -k ld_so
+
+# Audit configuration
+-w /etc/audit/        -p wa -k audit_config
+-w /etc/libaudit.conf -p wa -k audit_config
+
+# Privileged binaries integrity
+-w /usr/bin/sudo   -p wa -k privileged_binary
+-w /usr/bin/su     -p wa -k privileged_binary
+-w /usr/bin/pkexec -p wa -k privileged_binary
+
+
+## ============================================================
+## SECTION 4: PERSISTENCE MECHANISMS
+## ============================================================
+
+# systemd units
+-w /etc/systemd/system/     -p wa -k systemd_units
+-w /usr/lib/systemd/system/ -p wa -k systemd_units
+
+# Cron (optional — uncomment if needed)
+#-w /etc/cron.d/       -p wa -k cron
+#-w /etc/cron.daily/   -p wa -k cron
+#-w /etc/cron.hourly/  -p wa -k cron
+#-w /etc/cron.monthly/ -p wa -k cron
+#-w /etc/cron.weekly/  -p wa -k cron
+#-w /etc/crontab       -p wa -k cron
+#-w /var/spool/cron/   -p wa -k cron
+
+
+## ============================================================
+## SECTION 5: NETWORK CONFIGURATION
+## ============================================================
+
+# NetworkManager
+-w /etc/NetworkManager/ -p wa -k network_config
+
+# systemd-networkd
+-w /etc/systemd/network/ -p wa -k network_config
+
+# Core networking
+-w /etc/hosts         -p wa -k network_config
+-w /etc/hostname      -p wa -k network_config
+-w /etc/resolv.conf   -p wa -k network_config
+-w /etc/nsswitch.conf -p wa -k network_config
+
+# Firewall
+-w /etc/iptables/     -p wa -k firewall
+-w /etc/nftables.conf -p wa -k firewall
+
+
+## ============================================================
+## SECTION 6: FILESYSTEM & PROCESS ACTIVITY
+## Human-user focused
+## ============================================================
+
+# File deletion / rename
+# ONLY user-level sensitive directories
+-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat \
+-F auid>=1000 \
+-F dir=/home \
+-k file_delete
+
+-a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat \
+-F auid>=1000 \
+-F dir=/home \
+-k file_delete
+
+
+# Permission changes
+-a always,exit -F arch=b64 \
+-S chmod,fchmod,fchmodat \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k perm_change
+
+-a always,exit -F arch=b32 \
+-S chmod,fchmod,fchmodat \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k perm_change
+
+
+# Ownership changes
+-a always,exit -F arch=b64 \
+-S chown,fchown,fchownat,lchown \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k ownership_change
+
+-a always,exit -F arch=b32 \
+-S chown,fchown,fchownat,lchown \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k ownership_change
+
+
+# Mount activity
+-a always,exit -F arch=b64 \
+-S mount,umount2 \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k mount_activity
+
+-a always,exit -F arch=b32 \
+-S mount,umount \
+-F auid>=1000 \
+-F auid!=4294967295 \
+-k mount_activity
+
+
+# Kernel module loading/unloading
+-a always,exit -F arch=b64 \
+-S init_module,finit_module,delete_module \
+-k kernel_module_activity
+
+-a always,exit -F arch=b32 \
+-S init_module,finit_module,delete_module \
+-k kernel_module_activity
+
+
+## ============================================================
+## SECTION 7: TIME & HOSTNAME CHANGES
+## ============================================================
+
+# Time changes
+-a always,exit -F arch=b64 \
+-S adjtimex,settimeofday,clock_settime \
+-k time_change
+
+-a always,exit -F arch=b32 \
+-S adjtimex,settimeofday,clock_settime \
+-k time_change
+
+-w /etc/localtime -p wa -k time_change
+
+
+# Hostname/domain changes
+-a always,exit -F arch=b64 \
+-S sethostname,setdomainname \
+-k hostname_change
+
+-a always,exit -F arch=b32 \
+-S sethostname,setdomainname \
+-k hostname_change
+
+
+## ============================================================
+## SECTION 8: FAILED ACCESS ATTEMPTS
+## Reduced-noise version
+## ============================================================
+
+-a always,exit -F arch=b64 \
+-S openat \
+-F exit=-EACCES \
+-F auid>=1000 \
+-k access_denied
+
+-a always,exit -F arch=b64 \
+-S openat \
+-F exit=-EPERM \
+-F auid>=1000 \
+-k access_denied
+
+-a always,exit -F arch=b32 \
+-S openat \
+-F exit=-EACCES \
+-F auid>=1000 \
+-k access_denied
+
+-a always,exit -F arch=b32 \
+-S openat \
+-F exit=-EPERM \
+-F auid>=1000 \
+-k access_denied
+
+
+## ============================================================
+## SECTION 9: SSH KEYS
+## ============================================================
+
+# Root SSH keys
+-a always,exit -F arch=b64 \
+-F dir=/root/.ssh \
+-F perm=rwa \
+-k ssh_keys
+
+-a always,exit -F arch=b32 \
+-F dir=/root/.ssh \
+-F perm=rwa \
+-k ssh_keys
+
+
+# User SSH keys
+# Replace username/path if needed
+-a always,exit -F arch=b64 \
+-F dir=/home/aymen/.ssh \
+-F perm=rwa \
+-k ssh_keys
+
+-a always,exit -F arch=b32 \
+-F dir=/home/aymen/.ssh \
+-F perm=rwa \
+-k ssh_keys
+
+
+## ============================================================
+## SECTION 10: LOG TAMPERING
+## ============================================================
+
+# Audit logs
+-w /var/log/audit/ -p wa -k audit_log_tamper
+
+# auditd tooling execution
+-w /usr/bin/auditctl -p x -k auditd_tampering
+-w /usr/bin/aureport -p x -k auditd_tampering
+-w /usr/bin/ausearch -p x -k auditd_tampering
+-w /usr/bin/autrace  -p x -k auditd_tampering

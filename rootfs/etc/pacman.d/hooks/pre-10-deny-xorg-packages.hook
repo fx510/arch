@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Type = Package
+Target = *
+
+[Action]
+Description = Deny installation of xorg packages (Wayland-only system)
+When = PreTransaction
+AbortOnFail
+NeedsTargets
+Exec=/bin/bash -c "grep -qi 'xorg\|xlib\|x11' - && echo 'ERROR: X11 packages not allowed. This is a Wayland-only system. Find Wayland alternatives.' && exit 1 || exit 0"

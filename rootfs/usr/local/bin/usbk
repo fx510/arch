@@ -1,0 +1,7 @@
+#!/bin/bash
+
+# Disable all USB devices by writing '0' to the 'authorized' file
+for usb in /sys/bus/usb/devices/usb*; do
+  echo 0 > "$usb/authorized"
+done
+echo "USB Ports Disabled."

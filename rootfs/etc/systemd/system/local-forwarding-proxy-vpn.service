@@ -1,0 +1,31 @@
+[Unit]
+Description=Forward proxy using Glider (through Psiphon VPN)
+After=network.target nftables.service psiphon.service
+Requires=psiphon.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+Group=allow-internet
+Restart=always
+LimitNOFILE=102400
+# Chain through Psiphon VPN on port 8081
+ExecStart=/usr/bin/glider -listen http://127.0.0.1:8080 -forward http://127.0.0.1:8081
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

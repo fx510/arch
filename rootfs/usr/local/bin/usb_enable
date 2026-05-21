@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Function to check if the script is run with root privileges
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Please run this script as root."
+        exit 1
+    fi
+}
+
+# Enable USB by loading the USB drivers
+enable_usb() {
+    echo "Enabling USB ports..."
+    
+    # Load drivers for USB 3.0 and USB 2.0/1.1 controllers
+    modprobe xhci_hcd 2>/dev/null && echo "Loaded xHCI driver (USB 3.0)."
+    modprobe uhci_hcd 2>/dev/null && echo "Loaded UHCI driver (USB 2.0/1.1)."
+    modprobe ehci_hcd 2>/dev/null && echo "Loaded EHCI driver (USB 2.0)."
+    
+    echo "USB ports enabled."
+}

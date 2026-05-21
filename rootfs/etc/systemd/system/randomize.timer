@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart Randomize  Service Every Minute
+
+[Timer]
+OnUnitActiveSec=5min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

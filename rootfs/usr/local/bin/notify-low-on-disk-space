@@ -1,0 +1,30 @@
+#!/bin/bash
+# /usr/local/bin/notify-low-on-disk-space
+# Called by auditd via space_left_action = exec ...
+#
+# NOTE: When auditd calls this via 'exec', stdout is not monitored by
+# auditd-notify. We use multiple delivery methods to ensure the alert lands.
+
+AVAILABLE=$(df /var/log/audit --output=avail 2>/dev/null | tail -n 1 | tr -d ' ')
+AVAILABLE_MB=$(( AVAILABLE / 1024 ))
+
+MSG="Only ${AVAILABLE_MB}MB available on audit log partition. Free up space or rotate logs."
+
+# 1. Broadcast to all logged-in terminal users
+wall "[AUDITD] LOW DISK SPACE: $MSG"
+
+# 2. Write to kernel log (visible in dmesg and journald)
+logger -p daemon.warn -t auditd-disk-space "$MSG"
+
+# 3. Desktop notification for each active graphical session
+who | awk '{print $1}' | sort -u | while read -r user; do
+    uid=$(id -u "$user" 2>/dev/null) || continue
+    dbus_addr=$(cat "/proc/$(pgrep -u "$uid" dbus-daemon | head -1)/environ" 2>/dev/null \
+        | tr '\0' '\n' | grep DBUS_SESSION_BUS_ADDRESS | cut -d= -f2-)
+
+    if [ -n "$dbus_addr" ]; then
+        sudo -u "$user" \
+            DBUS_SESSION_BUS_ADDRESS="$dbus_addr" \
+            notify-send -u critical -t 0 "LOW DISK SPACE" "$MSG" 2>/dev/null
+    fi
+done
