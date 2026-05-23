@@ -1,0 +1,39 @@
+# ====================================================================
+# FIREFOX HARDENED OVERRIDE CONFIGURATION
+# Save as: ~/.config/firejail/firefox.local
+# ====================================================================
+
+# --- NETWORK & INTEGRATION ---
+# Let Firejail automatically use whatever internet connection is currently active
+ignore net none
+
+ignore nodbus
+ignore nodvd
+ignore notv
+
+# --- BINARY & SYSTEM RESTRICTIONS ---
+private-bin firefox,firefox-esr,pings,glxinfo
+private-dev
+
+# Hardened system file visibility (allows audio, hardware rendering, and SSL)
+private-etc alternatives,ca-certificates,crypto-policies,fonts,group,hostname,hosts,ld.so.cache,ld.so.conf,ld.so.conf.d,ld.so.preload,localtime,machine-id,mailcap,mime.types,nsswitch.conf,pango,passwd,pki,pulse,resolv.conf,ssl,X11,xdg,asound.conf,pulse,drirc,glvnd,nvidia,dri
+
+# --- FILE SYSTEM WHITE-LISTING ---
+whitelist ${HOME}/.mozilla
+whitelist ${DOWNLOADS}
+include whitelist-common.inc
+
+# Restrict configuration directories to read-only
+read-only ${HOME}/.config
+read-only ${HOME}/.local/share
+
+# --- KERNEL & SECURITY FILTERS ---
+seccomp !chroot
+protocol unix,inet,inet6,netlink
+
+# Disable execution in user-writable spaces
+noexec ${HOME}
+noexec /tmp
+
+# --- COMPATIBILITY FIXES (DO NOT ENABLE) ---
+# memory-deny-write-execute (Disabled: Triggers instant JIT/JavaScript crashes)

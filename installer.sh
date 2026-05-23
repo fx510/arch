@@ -277,7 +277,7 @@ fi
 
 # Setup firejail
 run_command arch-chroot /mnt /usr/bin/firecfg
-echo "$USER" >/mnt/etc/firejail/firejail.users
+run_command sed -i "s/USER_PLACEHOLDER/$USER/" /mnt/etc/firejail/firejail.users
 
 # Create kernel directory and configure cmdline
 run_command arch-chroot /mnt mkdir -p /etc/kernel

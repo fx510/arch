@@ -1,0 +1,40 @@
+# Firejail global overrides
+# These settings apply to ALL firejailed applications unless overridden
+
+# Blacklist sensitive directories by default
+blacklist /root
+blacklist /boot
+blacklist /sys
+blacklist /proc/kcore
+blacklist /proc/kallsyms
+
+# Disable network by default (override per-app with "net" in .local files)
+net none
+
+# Private /tmp and /dev
+private-tmp
+private-dev
+
+# Disable 3D acceleration (override per-app if needed)
+nodvd
+nogroups
+nonewprivs
+noroot
+nou2f
+notv
+
+# Seccomp: block dangerous syscalls
+seccomp
+seccomp.block-secondary
+
+# Capabilities: drop all by default
+caps.drop all
+
+# Disable shell access in sandboxed apps
+shell none
+
+# Disable debuggers
+nodbus
+
+# Restrict /proc and /sys
+private-etc none

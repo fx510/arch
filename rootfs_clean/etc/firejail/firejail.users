@@ -1,0 +1,5 @@
+# Users allowed to use firejail
+# One username per line
+# The installer will replace this with the actual username
+
+USER_PLACEHOLDER
