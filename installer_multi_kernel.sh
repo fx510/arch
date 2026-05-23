@@ -22,6 +22,7 @@ LOG_FILE="/tmp/arch_install_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 ## Helper function – runs a command, exits with red error on failure
+# Note: This does NOT hide command output; all stdout/stderr still appear.
 run_command() {
     "$@" || {
         echo -e "\e[31mError: Command failed: $*\e[0m" >&2
@@ -100,6 +101,9 @@ run_command mkdir -p /mnt/boot/loader/entries
 
 # Base system installation
 echo "Installing base system (pacstrap)..."
+echo "  → This will install: base, base-devel, linux-hardened, linux-zen, linux-lts,"
+echo "    linux-firmware, nano, sudo, networkmanager, git, plymouth"
+echo "  → Pacman will show each package as it downloads and installs."
 run_command pacstrap -K /mnt base base-devel \
     linux-hardened linux-hardened-headers \
     linux-zen linux-zen-headers \
@@ -234,7 +238,12 @@ EOL"
 if [ -n "${PACKAGE_FILE:-}" ] && [ -f "$PACKAGE_FILE" ]; then
     source "$PACKAGE_FILE"
     if [[ -n "${PACKAGES[@]:-}" ]]; then
+        total=${#PACKAGES[@]}
+        count=0
+        echo "==> Installing $total regular packages from $PACKAGE_FILE"
         for package in "${PACKAGES[@]}"; do
+            ((count++))
+            echo "==> [$count/$total] Installing package: $package"
             run_command arch-chroot /mnt pacman --noconfirm --needed -S "$package"
         done
     else
@@ -284,8 +293,12 @@ run_command arch-chroot /mnt rm -rf "/home/$USER/yay-bin"
 
 # Install AUR packages if defined
 if [[ -n "${AUR[@]:-}" ]]; then
+    total_aur=${#AUR[@]}
+    aur_count=0
+    echo "==> Installing $total_aur AUR packages"
     for aurpkg in "${AUR[@]}"; do
-        echo "Installing AUR package: $aurpkg"
+        ((aur_count++))
+        echo "==> [$aur_count/$total_aur] Installing AUR package: $aurpkg"
         run_command arch-chroot /mnt su - "$USER" -c "yay --noconfirm -S '$aurpkg'"
     done
 else
