@@ -157,13 +157,10 @@ def setup_disks():
 
     if ENCRYPTED:
         log_print("Setting up LUKS + LVM...")
-        # LUKS format: using a key file to avoid exposing password in ps
-        keyfile = "/tmp/luks_key"
-        Path(keyfile).write_text(LUKS_PASS, encoding="utf-8")
-        run_command(f"cryptsetup luksFormat {ROOT_DEV} --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha512 --key-file {keyfile}")
+        # LUKS format – pipe password directly
+        run_command(f"echo -n '{LUKS_PASS}' | cryptsetup luksFormat {ROOT_DEV} --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha512 --key-file=-")
         # Open LUKS
-        run_command(f"cryptsetup open {ROOT_DEV} archy --key-file {keyfile}")
-        os.remove(keyfile)
+        run_command(f"echo -n '{LUKS_PASS}' | cryptsetup open {ROOT_DEV} archy --key-file=-")
 
         run_command("pvcreate /dev/mapper/archy")
         run_command("vgcreate vg0 /dev/mapper/archy")
@@ -177,14 +174,13 @@ def setup_disks():
         root_mount = ROOT_DEV
 
     # Mount ESP and create necessary directories
-    Path("/mnt/boot").mkdir(parents=True, exist_ok=True)
+    Path("/mnt/boot").mkdir(parents=True, exist_ok=True) 
     run_command(f"mount {BOOT_DEV} /mnt/boot")
     Path("/mnt/boot/loader/entries").mkdir(parents=True, exist_ok=True)
     Path("/mnt/etc/kernel").mkdir(parents=True, exist_ok=True)
     
     log_print("✓ Disk setup complete")
     return root_mount
-
 # ========== BASE SYSTEM INSTALLATION ==========
 def install_base_system():
     log_print("=" * 60)
