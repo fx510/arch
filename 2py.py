@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Arch Linux installation script – refined version
+Arch Linux installation script – with post‑install verification & config checks
 Run as root.
 """
 
@@ -20,17 +20,22 @@ BOOT_DEV = "/dev/nvme0n1p1"
 USER = "test"
 USER_PASS = "asdasd"
 ROOT_PASS = "test"
-LUKS_PASS = "asdasd"           # Only used if ENCRYPTED=True
+LUKS_PASS = "asdasd"
 HOSTNAME = "archyBTW"
 ENCRYPTED = True
 
+
+### Dev mode flag – set False for real installs
+# True only in VM  
+DEV_MODE = False
+HOST_CACHE_DEV = "/dev/vda"
+### END Dev
+
 PACKAGE_FILE = "packages.cfg"
 
-# Kernels to install – choose any subset, the script adapts boot entries accordingly
-KERNELS = ["linux-hardened"]                # e.g., also add "linux-zen", "linux-lts"
-KERNEL_HEADERS = ["linux-hardened-headers"] # keep in sync with kernels
+KERNELS = ["linux-hardened"]
+KERNEL_HEADERS = ["linux-hardened-headers"]
 
-# Kernel command line parameters
 HARDENED_PARAMS = (
     "lsm=landlock,lockdown,yama,integrity,apparmor,bpf lockdown=integrity "
     "mem_sleep_default=deep audit=1 audit_backlog_limit=32768 "
@@ -43,6 +48,12 @@ LOG_FILE = f"/tmp/arch_install_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 PACSTRAP_RETRIES = 3
 PACSTRAP_RETRY_DELAY = 10
 
+# Mapping: "config file path (inside chroot)" → "package that should provide it"
+CONFIG_CHECKS = {
+    "/usr/bin/firecfg": "firejail",
+    "/boot/loader/entries/arch-hardened.conf": "linux-hardened",
+}
+
 # ========== HELPER FUNCTIONS ==========
 def log_print(msg: str, is_error: bool = False):
     if is_error:
@@ -52,9 +63,6 @@ def log_print(msg: str, is_error: bool = False):
         f.write(msg + "\n")
 
 def run_command(cmd, check=True, **kwargs):
-    """Run a command, log it, optionally exit on failure.
-       If cmd is a string, shell=True is used.
-       Returns a CompletedProcess if check=False, otherwise raises on failure."""
     log_print(f"$ {cmd if isinstance(cmd, str) else ' '.join(cmd)}")
     try:
         if isinstance(cmd, str):
@@ -64,12 +72,11 @@ def run_command(cmd, check=True, **kwargs):
     except subprocess.CalledProcessError as e:
         if check:
             log_print(f"Error: Command failed with exit code {e.returncode}: {cmd}", is_error=True)
-            raise  # re-raise to let caller handle
+            raise
         else:
             return e
 
 def run_command_retry(cmd, description, max_retries=3, delay=10):
-    """Run a command, retrying on failure."""
     for attempt in range(1, max_retries + 1):
         log_print(f"Attempt {attempt}/{max_retries}: {description}")
         try:
@@ -84,8 +91,6 @@ def run_command_retry(cmd, description, max_retries=3, delay=10):
     return False
 
 def run_chroot(cmd, input_text=None):
-    """Run a command inside /mnt using arch-chroot.
-       If cmd is a string, it is passed to bash -c."""
     if isinstance(cmd, str):
         full_cmd = ["arch-chroot", "/mnt", "bash", "-c", cmd]
     else:
@@ -135,15 +140,27 @@ def validate_setup():
     log_print("Setup validation passed.")
 
 def setup_reflector():
-    log_print("Installing reflector on live system and generating mirrorlist...")
-    run_command("pacman -Sy --noconfirm reflector")
+    log_print("Installing reflector and pacman-contrib...")
+    run_command("pacman -Sy --noconfirm reflector pacman-contrib")
+
+    temp_mirrorlist = "/tmp/mirrorlist_raw"
     run_command(
-        "reflector --country Spain --country France --latest 30 --protocol https --sort rate --threads 10 --save /etc/pacman.d/mirrorlist"
+        "reflector --country Spain --country France --latest 30 --protocol https "
+        "--sort rate --threads 10 --save " + temp_mirrorlist
     )
-    # Verify
+
+    log_print("Ranking mirrors by speed (this may take a minute)...")
+    final_mirrorlist = "/etc/pacman.d/mirrorlist"
+    run_command(f"rankmirrors -n 6 {temp_mirrorlist} > {final_mirrorlist}")
+
     result = subprocess.run("grep -c '^Server' /etc/pacman.d/mirrorlist", shell=True, capture_output=True, text=True)
     servers = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-    log_print(f"✓ Mirrorlist contains {servers} servers.")
+    if servers == 0:
+        log_print("rankmirrors produced no servers, falling back to raw list", is_error=True)
+        shutil.copy(temp_mirrorlist, final_mirrorlist)
+    else:
+        log_print(f"✓ Mirrorlist contains {servers} ranked servers.")
+
     run_command("pacman -Syy")
 
 # ========== DISK SETUP ==========
@@ -151,17 +168,26 @@ def setup_disks():
     log_print("=" * 60)
     log_print("DISK SETUP")
     log_print("=" * 60)
-    
-    # Format ESP
+
     run_command(f"mkfs.fat -F32 {BOOT_DEV}")
 
     if ENCRYPTED:
-        log_print("Setting up LUKS + LVM...")
-        # LUKS format – pipe password directly
-        run_command(f"echo -n '{LUKS_PASS}' | cryptsetup luksFormat {ROOT_DEV} --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha512 --key-file=-")
-        # Open LUKS
+        log_print("Setting up LUKS2 + LVM (strong params)...")
+        # Strong LUKS2: argon2id, 1GB memory-hard KDF, AES-XTS-256, 4096-byte sectors
+        run_command(
+            f"echo -n '{LUKS_PASS}' | cryptsetup luksFormat {ROOT_DEV} "
+            f"--type luks2 "
+            f"--cipher aes-xts-plain64 "
+            f"--key-size 512 "
+            f"--hash sha512 "
+            f"--pbkdf argon2id "
+            f"--pbkdf-memory 1048576 "
+            f"--pbkdf-parallel 4 "
+            f"--iter-time 3000 "
+            f"--sector-size 4096 "
+            f"--key-file=-"
+        )
         run_command(f"echo -n '{LUKS_PASS}' | cryptsetup open {ROOT_DEV} archy --key-file=-")
-
         run_command("pvcreate /dev/mapper/archy")
         run_command("vgcreate vg0 /dev/mapper/archy")
         run_command("lvcreate --name root --extents 100%FREE vg0")
@@ -173,31 +199,42 @@ def setup_disks():
         run_command(f"mount {ROOT_DEV} /mnt")
         root_mount = ROOT_DEV
 
-    # Mount ESP and create necessary directories
-    Path("/mnt/boot").mkdir(parents=True, exist_ok=True) 
+    Path("/mnt/boot").mkdir(parents=True, exist_ok=True)
     run_command(f"mount {BOOT_DEV} /mnt/boot")
     Path("/mnt/boot/loader/entries").mkdir(parents=True, exist_ok=True)
     Path("/mnt/etc/kernel").mkdir(parents=True, exist_ok=True)
-    
+
     log_print("✓ Disk setup complete")
     return root_mount
+
 # ========== BASE SYSTEM INSTALLATION ==========
 def install_base_system():
     log_print("=" * 60)
     log_print("BASE SYSTEM INSTALLATION")
     log_print("=" * 60)
-    
-    # Build package list: base, headers, firmware, etc.
+
+    ### Dev mode
+    if DEV_MODE and HOST_CACHE_DEV:
+        cache_mount = "/mnt/var/cache/pacman/pkg"
+        if Path(HOST_CACHE_DEV).exists():
+            log_print(f"[DEV] Mounting host pacman cache {HOST_CACHE_DEV} → {cache_mount}")
+            Path(cache_mount).mkdir(parents=True, exist_ok=True)
+            run_command(f"mount {HOST_CACHE_DEV} {cache_mount}")
+            log_print("✓ Host pacman cache mounted")
+        else:
+            log_print(f"⚠ [DEV] {HOST_CACHE_DEV} not found — skipping cache mount", is_error=True)
+
+    ### End Dev mode
+
     base_pkgs = ["base", "base-devel", "linux-firmware", "nano", "sudo", "networkmanager", "git", "plymouth"]
     base_pkgs.extend(KERNELS)
     base_pkgs.extend(KERNEL_HEADERS)
     if ENCRYPTED:
         base_pkgs.append("lvm2")
-    
+
     pkg_str = " ".join(base_pkgs)
     log_print(f"Installing: {pkg_str}")
-    
-    # Retry loop with mirror refresh
+
     for attempt in range(1, PACSTRAP_RETRIES + 1):
         log_print(f"--- pacstrap attempt {attempt}/{PACSTRAP_RETRIES} ---")
         try:
@@ -208,9 +245,8 @@ def install_base_system():
             if attempt == PACSTRAP_RETRIES:
                 log_print("FATAL: pacstrap failed after all retries", is_error=True)
                 sys.exit(1)
-            log_print(f"pacstrap failed. Refreshing mirrors and retrying...", is_error=True)
-            run_command("reflector --latest 30 --protocol https --sort rate --save /etc/pacman.d/mirrorlist")
-            run_command("pacman -Syy")
+            log_print("pacstrap failed. Refreshing mirrors and retrying...", is_error=True)
+            setup_reflector()
             time.sleep(PACSTRAP_RETRY_DELAY)
 
 # ========== SYSTEM CONFIGURATION ==========
@@ -218,10 +254,9 @@ def configure_system(root_mount):
     log_print("=" * 60)
     log_print("SYSTEM CONFIGURATION")
     log_print("=" * 60)
-    
+
     run_command("genfstab -U /mnt > /mnt/etc/fstab")
-    
-    # Basic settings
+
     run_chroot("ln -sf /usr/share/zoneinfo/Europe/Amsterdam /etc/localtime")
     run_chroot("hwclock --systohc")
     run_chroot("echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen")
@@ -232,8 +267,7 @@ def configure_system(root_mount):
     write_file(Path("/etc/hostname"), f"{HOSTNAME}\n", chroot=True)
     hosts = f"127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\t{HOSTNAME}.localdomain\n"
     write_file(Path("/etc/hosts"), hosts, chroot=True)
-    
-    # Users and passwords
+
     run_chroot(f"echo 'root:{ROOT_PASS}' | chpasswd")
     run_chroot(f"useradd -m -s /bin/bash {USER}")
     run_chroot(f"echo '{USER}:{USER_PASS}' | chpasswd")
@@ -241,10 +275,9 @@ def configure_system(root_mount):
         run_chroot(f"groupadd -rf {group}")
         run_chroot(f"gpasswd -a {USER} {group}")
     run_chroot("groupadd -rf allow-internet")
-    
-    # Enable NetworkManager early
+
     run_chroot("systemctl enable NetworkManager")
-    
+
     log_print("✓ System configuration complete")
 
 # ========== BOOT CONFIGURATION ==========
@@ -252,20 +285,16 @@ def configure_boot(root_mount):
     log_print("=" * 60)
     log_print("BOOT CONFIGURATION")
     log_print("=" * 60)
-    
-    # Get UUIDs for kernel cmdline
+
     if ENCRYPTED:
         root_uuid = subprocess.run(f"blkid -s UUID -o value {ROOT_DEV}", capture_output=True, text=True, shell=True).stdout.strip()
-        # We'll use sd-encrypt hook, so no crypttab.initramfs needed
-        # Set mkinitcpio hooks: base systemd plymouth autodetect modconf block sd-encrypt lvm2 filesystems keyboard fsck
         hooks = "base systemd plymouth autodetect modconf block sd-encrypt lvm2 filesystems keyboard fsck"
     else:
         root_uuid = subprocess.run(f"blkid -s UUID -o value {ROOT_DEV}", capture_output=True, text=True, shell=True).stdout.strip()
         hooks = "base systemd plymouth autodetect modconf block filesystems keyboard fsck"
-    
+
     run_chroot(f"sed -i 's/^HOOKS.*/HOOKS=({hooks})/' /etc/mkinitcpio.conf")
-    
-    # Helper to create boot entries for each installed kernel
+
     def create_entry(kernel_name, kernel_image, initrd_image, params):
         conf = f"title   {HOSTNAME} - {kernel_name}\n"
         conf += f"linux   /{kernel_image}\n"
@@ -276,38 +305,33 @@ def configure_boot(root_mount):
             conf += f"options root=UUID={root_uuid} rw {params}\n"
         return conf
 
-    # Map kernel package names to boot files
     kernel_map = {
         "linux-hardened": ("vmlinuz-linux-hardened", "initramfs-linux-hardened.img", "initramfs-linux-hardened-fallback.img", HARDENED_PARAMS),
         "linux-zen":      ("vmlinuz-linux-zen",      "initramfs-linux-zen.img",      "initramfs-linux-zen-fallback.img",      STANDARD_PARAMS),
         "linux-lts":      ("vmlinuz-linux-lts",      "initramfs-linux-lts.img",      "initramfs-linux-lts-fallback.img",      STANDARD_PARAMS),
     }
-    
+
     entries_dir = Path("/mnt/boot/loader/entries")
     default_entry = None
     for pkg, (vmlinuz, initrd, fallback_initrd, params) in kernel_map.items():
         if pkg in KERNELS:
-            safe_name = pkg.replace("linux-", "arch-")  # e.g., arch-hardened, arch-zen, arch-lts
-            # Main entry
+            safe_name = pkg.replace("linux-", "arch-")
             entry_conf = create_entry(f"Linux {pkg.split('-')[1].capitalize()}", vmlinuz, initrd, params)
             (entries_dir / f"{safe_name}.conf").write_text(entry_conf)
-            # Fallback entry (with no extra params for safety)
             fallback_conf = create_entry(f"Linux {pkg.split('-')[1].capitalize()} (fallback)", vmlinuz, fallback_initrd, "")
             (entries_dir / f"{safe_name}-fallback.conf").write_text(fallback_conf)
             if default_entry is None:
                 default_entry = f"{safe_name}.conf"
 
-    # Bootloader main config
     loader_conf = f"default {default_entry}\ntimeout 5\nconsole-mode max\neditor no\n"
     write_file(Path("/boot/loader/loader.conf"), loader_conf, chroot=True)
-    
-    # Kernel cmdline for UKI if ever needed
+
     if ENCRYPTED:
         cmdline = f"rd.luks.name={root_uuid}=archy root={root_mount} rw {HARDENED_PARAMS}"
     else:
         cmdline = f"root=UUID={root_uuid} rw {HARDENED_PARAMS}"
     write_file(Path("/etc/kernel/cmdline"), cmdline, chroot=True)
-    
+
     log_print("✓ Boot configuration complete")
 
 # ========== PACKAGE INSTALLATION ==========
@@ -324,24 +348,42 @@ def install_regular_packages():
         log_print(f"✓ Installed {total} regular packages")
     else:
         log_print("No regular packages found.")
+
+    log_print("Installing systemd-boot...")
+    run_chroot("bootctl install")
+
+    # Install plymouth theme package before setting it
+    log_print("Installing plymouth-theme-arch-charge...")
+    run_chroot("pacman --noconfirm --needed -S plymouth-theme-arch-charge")
+
+    # Verify theme files exist before activating
+    theme_path = Path("/mnt/usr/share/plymouth/themes/arch-charge/arch-charge.plymouth")
+    if theme_path.exists():
+        log_print("Setting plymouth theme: arch-charge")
+        run_chroot("plymouth-set-default-theme -R arch-charge")
+    else:
+        log_print(
+            "⚠ plymouth-theme-arch-charge files not found after install — "
+            "falling back to default 'spinner' theme",
+            is_error=True
+        )
+        run_chroot("plymouth-set-default-theme -R spinner")
+
     return aur
 
 def install_aur_packages(aur_packages):
     log_print("=" * 60)
     log_print("AUR PACKAGES INSTALLATION")
     log_print("=" * 60)
-    
-    # Optional: install reflector in target system (if you plan to keep mirrors up-to-date)
+
     run_chroot("pacman --noconfirm --needed -S reflector")
-    
-    # Grant temporary sudo rights for yay
+
     run_chroot(f"echo '{USER} ALL=(ALL) NOPASSWD:ALL   # temp-for-yay' >> /etc/sudoers")
-    
-    # Install yay-bin
+
     run_chroot(f"su - {USER} -c 'git clone https://aur.archlinux.org/yay-bin.git /home/{USER}/yay-bin'")
     run_chroot(f"su - {USER} -c 'cd /home/{USER}/yay-bin && makepkg -si --noconfirm'")
     run_chroot(f"rm -rf /home/{USER}/yay-bin")
-    
+
     if aur_packages:
         total_aur = len(aur_packages)
         for idx, aurpkg in enumerate(aur_packages, 1):
@@ -350,8 +392,7 @@ def install_aur_packages(aur_packages):
         log_print(f"✓ Installed {total_aur} AUR packages")
     else:
         log_print("No AUR packages to install.")
-    
-    # Remove temporary sudo line
+
     run_chroot("sed -i '/# temp-for-yay$/d' /etc/sudoers")
 
 # ========== POST-INSTALLATION ==========
@@ -359,20 +400,12 @@ def post_installation():
     log_print("=" * 60)
     log_print("POST-INSTALLATION TASKS")
     log_print("=" * 60)
-    
-    # systemd-boot installation
-    run_chroot("bootctl install")
-    
-    # Plymouth theme
-    run_chroot("plymouth-set-default-theme -R arch-charge")
-    
-    # Deploy rootfs overlay if present
+
     if Path("rootfs_clean").is_dir():
         log_print("Deploying rootfs_clean overlay...")
         run_command("cp -a rootfs_clean/* /mnt/")
         for f in Path("/mnt/usr/local/bin").glob("*"):
             if f.is_file(): f.chmod(0o755)
-        # Fix audit_notify user id
         uid = subprocess.run(f"arch-chroot /mnt id -u {USER}", capture_output=True, text=True, shell=True).stdout.strip()
         audit_script = Path("/mnt/usr/local/bin/audit_notify.py")
         if audit_script.exists():
@@ -380,18 +413,77 @@ def post_installation():
             content = content.replace("USER_ID = 1000", f"USER_ID = {uid}")
             audit_script.write_text(content)
 
-    # Firejail configuration
-    run_chroot("/usr/bin/firecfg")
-    firejail_users = Path("/mnt/etc/firejail/firejail.users")
-    if firejail_users.exists():
-        content = firejail_users.read_text()
-        content = content.replace("USER_PLACEHOLDER", USER)
-        firejail_users.write_text(content)
-    
-    # Rebuild all initramfs images (important after hook changes)
+    # Firejail config – only run firecfg if firejail is installed
+    if Path("/mnt/usr/bin/firecfg").exists():
+        run_chroot("/usr/bin/firecfg")
+        firejail_users = Path("/mnt/etc/firejail/firejail.users")
+        if firejail_users.exists():
+            content = firejail_users.read_text()
+            content = content.replace("USER_PLACEHOLDER", USER)
+            firejail_users.write_text(content)
+    else:
+        log_print("firejail not installed, skipping firecfg.", is_error=True)
+
     run_chroot("mkinitcpio -P")
-    
     log_print("✓ Post-installation tasks complete")
+
+# ========== CONFIG VERIFICATION & INSTALL POST SCRIPT ==========
+def install_post_script():
+    """
+    Check that every config file listed in CONFIG_CHECKS has its required package installed.
+    Display results and ask for user confirmation (y/n).
+    If confirmed and there are missing packages, attempt to install them.
+    """
+    log_print("=" * 60)
+    log_print("POST-INSTALLATION CONFIG CHECK")
+    log_print("=" * 60)
+
+    missing = []
+    found = []
+    for conf_path, pkg in CONFIG_CHECKS.items():
+        full_path = Path("/mnt") / conf_path.lstrip("/")
+        if full_path.exists():
+            try:
+                run_chroot(f"pacman -Q {pkg}")
+                found.append((conf_path, pkg))
+                log_print(f"✓ {conf_path} exists and package {pkg} is installed.")
+            except subprocess.CalledProcessError:
+                missing.append((conf_path, pkg, "Package not installed"))
+                log_print(f"⚠ {conf_path} exists, but package {pkg} is NOT installed.", is_error=True)
+        else:
+            missing.append((conf_path, pkg, "Config file missing"))
+            log_print(f"⚠ Config file {conf_path} is missing (expected package {pkg}).", is_error=True)
+
+    print("\n" + "=" * 60)
+    print("CONFIG VERIFICATION SUMMARY")
+    print("=" * 60)
+    if not missing:
+        print("All config files are present and required packages are installed.")
+    else:
+        print("The following issues were found:")
+        for conf, pkg, reason in missing:
+            print(f"  - {conf}: {reason} (expected package: {pkg})")
+
+    while True:
+        choice = input("\nDo you want to proceed? (y/n): ").strip().lower()
+        if choice in ("y", "n"):
+            break
+        print("Please enter 'y' or 'n'.")
+
+    if choice == "n":
+        log_print("User chose not to proceed. Aborting.", is_error=True)
+        sys.exit(0)
+
+    if missing:
+        log_print("Attempting to install missing packages...")
+        pkgs_to_install = set(pkg for _, pkg, reason in missing if reason == "Package not installed")
+        if pkgs_to_install:
+            run_chroot(f"pacman --noconfirm --needed -S {' '.join(pkgs_to_install)}")
+            log_print("Missing packages installed.")
+        else:
+            log_print("No packages to install (only config file missing).")
+
+    log_print("✓ Post-installation config check complete.")
 
 # ========== VERIFICATION ==========
 def verify_installation():
@@ -401,7 +493,7 @@ def verify_installation():
     if ENCRYPTED:
         result = subprocess.run(f"blkid {ROOT_DEV} | grep -q 'crypto_LUKS'", shell=True)
         log_print("✓ LUKS verified" if result.returncode == 0 else "⚠ LUKS check failed!")
-    
+
     for pkg in KERNELS:
         try:
             run_chroot(f"pacman -Q {pkg}")
@@ -435,6 +527,11 @@ def main():
         f.write(f"Installation log started at {datetime.now()}\n")
     log_print(f"Log file: {LOG_FILE}")
 
+    if len(sys.argv) > 1 and sys.argv[1] == "--install-post":
+        log_print("Running post-installation config check only (--install-post).")
+        install_post_script()
+        return
+
     validate_setup()
     setup_reflector()
 
@@ -455,6 +552,9 @@ def main():
     install_aur_packages(aur_packages)
     post_installation()
     verify_installation()
+
+    install_post_script()
+
     final_setup()
 
 if __name__ == "__main__":
