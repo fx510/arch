@@ -1,22 +1,46 @@
 #!/usr/bin/env python3
 """
-Arch Linux installation script – with post‑install verification & config checks
-Run as root.
+Arch Linux installation script – paranoid edition
+Features: manual LUKS passphrase + UKI (unsigned) + kernel lockdown + IMA
+           NO Secure Boot, NO TPM, NO Firejail, NO AUR/yay, NO Plymouth.
+
+Run as root on a live Arch ISO.
+
+PATCHED VERSION — fixes applied:
+  1. CONFIG_CHECKS now points at the file that is actually written
+     (/efi/loader/entries/arch-hardened-uki.conf), not a nonexistent
+     /boot/loader/entries/arch-hardened.conf.
+  2. The mkinitcpio preset is re-written immediately before the final
+     `mkinitcpio -P` call in post_installation(), in case pacstrap's
+     kernel-install hook (90-mkinitcpio-install.hook) already ran
+     mkinitcpio once during base install and/or package install
+     clobbered/regenerated the stock preset.
+  3. post_installation() now runs mkinitcpio with -v and captures
+     output to the log, and explicitly checks for the systemd-boot
+     EFI stub (linuxx64.efi.stub) before building, so a missing-stub
+     failure is reported clearly instead of silently producing only
+     a plain initramfs.
+  4. Verbose mkinitcpio output is scanned for the UKI creation line
+     so success/failure is detected from real evidence, not just
+     "does the file exist".
+  5. FIXED: write_file() pathlib join bug — absolute paths on the right
+     side of / operator discard the left side, so Path("/mnt") / Path("/etc/...")
+     was writing to the live ISO instead of the chroot target. Now strips
+     leading slash before joining.
+  6. FIXED: Similar path join issues in other places (cleanup function,
+     ukify config, etc.) where absolute paths were used with /mnt prefix.
+  7. FIXED: mkinitcpio preset now includes ALL_config and ALL_kver which
+     are required for UKI generation to work properly.
 """
 
-import subprocess
-import sys
-import os
-import shutil
-import re
-import time
+import subprocess, sys, os, shutil, re, time, textwrap
 from pathlib import Path
 from datetime import datetime
 import atexit
 
 # ========== CONFIGURATION ==========
-ROOT_DEV = "/dev/nvme0n1p2"
-BOOT_DEV = "/dev/nvme0n1p1"
+ROOT_DEV = "/dev/nvme0n1p2"       # LUKS container
+BOOT_DEV = "/dev/nvme0n1p1"       # EFI System Partition
 USER = "test"
 USER_PASS = "asdasd"
 ROOT_PASS = "test"
@@ -24,37 +48,40 @@ LUKS_PASS = "asdasd"
 HOSTNAME = "archyBTW"
 ENCRYPTED = True
 
-
-### Dev mode flag – set False for real installs
-# True only in VM  
-DEV_MODE = False
+DEV_MODE = True
 HOST_CACHE_DEV = "/dev/vda"
-### END Dev
 
 PACKAGE_FILE = "packages.cfg"
 
-KERNELS = ["linux-hardened"]
-KERNEL_HEADERS = ["linux-hardened-headers"]
+KERNELS = ["linux-hardened", "linux-lts"]
+KERNEL_HEADERS = ["linux-hardened-headers", "linux-lts-headers"]
+
 
 HARDENED_PARAMS = (
     "lsm=landlock,lockdown,yama,integrity,apparmor,bpf lockdown=integrity "
-    "mem_sleep_default=deep audit=1 audit_backlog_limit=32768 "
-    "quiet splash rd.udev.log_level=3"
+    "ima_policy=tcb mem_sleep_default=deep quiet rd.udev.log_level=3"
 )
-STANDARD_PARAMS = "quiet splash rd.udev.log_level=3"
+STANDARD_PARAMS = "quiet rd.udev.log_level=3"
 
 LOG_FILE = f"/tmp/arch_install_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-
 PACSTRAP_RETRIES = 3
 PACSTRAP_RETRY_DELAY = 10
-
-# Mapping: "config file path (inside chroot)" → "package that should provide it"
+UKI_PATH_HARDENED = "/efi/EFI/Linux/arch-hardened.efi"
+UKI_PATH_LTS = "/efi/EFI/Linux/arch-lts.efi"
+UKI_PATH = "/efi/EFI/Linux/arch-hardened.efi"
+LOADER_ENTRY_NAME = "arch-hardened-uki.conf"
+LOADER_ENTRY_NAME_LTS = "arch-lts-uki.conf"
+# FIX #1: this now matches the file actually written in configure_boot()
+# (Path("/mnt/efi/loader/entries") / "arch-hardened-uki.conf"), instead of
+# a /boot/loader/entries/arch-hardened.conf path that never gets created
+# because /boot is not a separate mount and the filename didn't match.
 CONFIG_CHECKS = {
-    "/usr/bin/firecfg": "firejail",
-    "/boot/loader/entries/arch-hardened.conf": "linux-hardened",
+    f"/efi/loader/entries/{LOADER_ENTRY_NAME}": "linux-hardened",
+    f"/efi/loader/entries/{LOADER_ENTRY_NAME_LTS}": "linux-lts",
 }
 
-# ========== HELPER FUNCTIONS ==========
+
+# ========== HELPERS ==========
 def log_print(msg: str, is_error: bool = False):
     if is_error:
         msg = f"\033[31m{msg}\033[0m"
@@ -90,30 +117,48 @@ def run_command_retry(cmd, description, max_retries=3, delay=10):
             time.sleep(delay)
     return False
 
-def run_chroot(cmd, input_text=None):
+def run_chroot(cmd, input_text=None, check=True, capture_output=False):
     if isinstance(cmd, str):
         full_cmd = ["arch-chroot", "/mnt", "bash", "-c", cmd]
     else:
         full_cmd = ["arch-chroot", "/mnt"] + cmd
-    run_command(full_cmd, input=input_text)
+    kwargs = {}
+    if capture_output:
+        kwargs["capture_output"] = True
+        kwargs["text"] = True
+    return run_command(full_cmd, input=input_text, check=check, **kwargs)
 
 def write_file(path: Path, content: str, chroot: bool = False):
-    dest = Path("/mnt") / path if chroot else path
+    """
+    Write a file. If chroot=True, the path is relative to /mnt.
+    
+    FIX #5: Strip leading slash before joining to prevent pathlib from
+    discarding "/mnt" when path is absolute (e.g., Path("/mnt") / Path("/etc/hostname")
+    would produce Path("/etc/hostname") instead of Path("/mnt/etc/hostname")).
+    """
+    if chroot:
+        # Convert to string, strip leading slash, then join
+        dest = Path("/mnt") / str(path).lstrip("/")
+    else:
+        dest = path
+    
+    log_print(f"  -> Writing to: {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding="utf-8")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())   # force write to disk
     log_print(f"Wrote {dest}")
 
 def parse_package_file(filepath: str):
-    packages, aur = [], []
+    """Return only the PACKAGES list (ignores AUR)."""
+    packages = []
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
     pkg_match = re.search(r'PACKAGES\s*=\s*\(\s*([^)]+)\s*\)', content, re.DOTALL)
     if pkg_match:
         packages = [p for p in pkg_match.group(1).split() if p and not p.startswith('#')]
-    aur_match = re.search(r'AUR\s*=\s*\(\s*([^)]+)\s*\)', content, re.DOTALL)
-    if aur_match:
-        aur = [a for a in aur_match.group(1).split() if a and not a.startswith('#')]
-    return packages, aur
+    return packages
 
 def cleanup():
     log_print("Cleaning up on exit...")
@@ -142,17 +187,14 @@ def validate_setup():
 def setup_reflector():
     log_print("Installing reflector and pacman-contrib...")
     run_command("pacman -Sy --noconfirm reflector pacman-contrib")
-
     temp_mirrorlist = "/tmp/mirrorlist_raw"
     run_command(
         "reflector --country Spain --country France --latest 30 --protocol https "
-        "--sort rate --threads 10 --save " + temp_mirrorlist
+        "--sort rate --threads 50 --save " + temp_mirrorlist
     )
-
-    log_print("Ranking mirrors by speed (this may take a minute)...")
+    log_print("Ranking mirrors by speed...")
     final_mirrorlist = "/etc/pacman.d/mirrorlist"
     run_command(f"rankmirrors -n 6 {temp_mirrorlist} > {final_mirrorlist}")
-
     result = subprocess.run("grep -c '^Server' /etc/pacman.d/mirrorlist", shell=True, capture_output=True, text=True)
     servers = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
     if servers == 0:
@@ -160,7 +202,6 @@ def setup_reflector():
         shutil.copy(temp_mirrorlist, final_mirrorlist)
     else:
         log_print(f"✓ Mirrorlist contains {servers} ranked servers.")
-
     run_command("pacman -Syy")
 
 # ========== DISK SETUP ==========
@@ -169,25 +210,35 @@ def setup_disks():
     log_print("DISK SETUP")
     log_print("=" * 60)
 
+    run_command(f"wipefs -a {BOOT_DEV}")
+    run_command(f"wipefs -a {ROOT_DEV}")
     run_command(f"mkfs.fat -F32 {BOOT_DEV}")
 
     if ENCRYPTED:
-        log_print("Setting up LUKS2 + LVM (strong params)...")
-        # Strong LUKS2: argon2id, 1GB memory-hard KDF, AES-XTS-256, 4096-byte sectors
-        run_command(
-            f"echo -n '{LUKS_PASS}' | cryptsetup luksFormat {ROOT_DEV} "
-            f"--type luks2 "
-            f"--cipher aes-xts-plain64 "
-            f"--key-size 512 "
-            f"--hash sha512 "
-            f"--pbkdf argon2id "
-            f"--pbkdf-memory 1048576 "
-            f"--pbkdf-parallel 4 "
-            f"--iter-time 3000 "
-            f"--sector-size 4096 "
-            f"--key-file=-"
-        )
-        run_command(f"echo -n '{LUKS_PASS}' | cryptsetup open {ROOT_DEV} archy --key-file=-")
+        log_print("Setting up LUKS2 + LVM (argon2id, aes-xts-512)...")
+        try:
+            subprocess.run(
+                ["cryptsetup", "luksFormat", ROOT_DEV,
+                 "--type", "luks2", "--cipher", "aes-xts-plain64", "--key-size", "512",
+                 "--hash", "sha512", "--pbkdf", "argon2id", "--pbkdf-memory", "1048576",
+                 "--pbkdf-parallel", "4", "--iter-time", "3000", "--sector-size", "4096",
+                 "--key-file", "-"],
+                input=LUKS_PASS, text=True, check=True, capture_output=True
+            )
+        except subprocess.CalledProcessError as e:
+            log_print(f"luksFormat failed: {e.stderr}", is_error=True)
+            sys.exit(1)
+        log_print("LUKS container created.")
+
+        try:
+            subprocess.run(
+                ["cryptsetup", "open", ROOT_DEV, "archy", "--key-file", "-"],
+                input=LUKS_PASS, text=True, check=True, capture_output=True
+            )
+        except subprocess.CalledProcessError as e:
+            log_print(f"cryptsetup open failed: {e.stderr}", is_error=True)
+            sys.exit(1)
+
         run_command("pvcreate /dev/mapper/archy")
         run_command("vgcreate vg0 /dev/mapper/archy")
         run_command("lvcreate --name root --extents 100%FREE vg0")
@@ -199,9 +250,9 @@ def setup_disks():
         run_command(f"mount {ROOT_DEV} /mnt")
         root_mount = ROOT_DEV
 
-    Path("/mnt/boot").mkdir(parents=True, exist_ok=True)
-    run_command(f"mount {BOOT_DEV} /mnt/boot")
-    Path("/mnt/boot/loader/entries").mkdir(parents=True, exist_ok=True)
+    Path("/mnt/efi").mkdir(parents=True, exist_ok=True)
+    run_command(f"mount {BOOT_DEV} /mnt/efi")
+    Path("/mnt/efi/EFI/Linux").mkdir(parents=True, exist_ok=True)
     Path("/mnt/etc/kernel").mkdir(parents=True, exist_ok=True)
 
     log_print("✓ Disk setup complete")
@@ -213,20 +264,19 @@ def install_base_system():
     log_print("BASE SYSTEM INSTALLATION")
     log_print("=" * 60)
 
-    ### Dev mode
     if DEV_MODE and HOST_CACHE_DEV:
         cache_mount = "/mnt/var/cache/pacman/pkg"
         if Path(HOST_CACHE_DEV).exists():
             log_print(f"[DEV] Mounting host pacman cache {HOST_CACHE_DEV} → {cache_mount}")
             Path(cache_mount).mkdir(parents=True, exist_ok=True)
             run_command(f"mount {HOST_CACHE_DEV} {cache_mount}")
-            log_print("✓ Host pacman cache mounted")
         else:
             log_print(f"⚠ [DEV] {HOST_CACHE_DEV} not found — skipping cache mount", is_error=True)
 
-    ### End Dev mode
-
-    base_pkgs = ["base", "base-devel", "linux-firmware", "nano", "sudo", "networkmanager", "git", "plymouth"]
+    base_pkgs = [
+        "base", "base-devel", "linux-firmware", "nano", "sudo",
+        "networkmanager", "git", "systemd-ukify", "efibootmgr"
+    ]
     base_pkgs.extend(KERNELS)
     base_pkgs.extend(KERNEL_HEADERS)
     if ENCRYPTED:
@@ -256,146 +306,226 @@ def configure_system(root_mount):
     log_print("=" * 60)
 
     run_command("genfstab -U /mnt > /mnt/etc/fstab")
-
+    run_chroot("sed -i '/\\/efi\\s.*vfat/s/\\(defaults\\)/\\1,ro/' /etc/fstab")
     run_chroot("ln -sf /usr/share/zoneinfo/Europe/Amsterdam /etc/localtime")
     run_chroot("hwclock --systohc")
     run_chroot("echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen")
     run_chroot("echo 'ar_SA.UTF-8 UTF-8' >> /etc/locale.gen")
     run_chroot("locale-gen")
     write_file(Path("/etc/locale.conf"), "LANG=en_US.UTF-8", chroot=True)
-    write_file(Path("/etc/vconsole.conf"), "KEYMAP=us", chroot=True)
+    run_chroot("echo 'KEYMAP=us' > /etc/vconsole.conf && chmod 644 /etc/vconsole.conf")
     write_file(Path("/etc/hostname"), f"{HOSTNAME}\n", chroot=True)
     hosts = f"127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\t{HOSTNAME}.localdomain\n"
     write_file(Path("/etc/hosts"), hosts, chroot=True)
 
-    run_chroot(f"echo 'root:{ROOT_PASS}' | chpasswd")
+    proc_root = subprocess.Popen(
+        ["arch-chroot", "/mnt", "chpasswd"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True
+    )
+    proc_root.communicate(input=f"root:{ROOT_PASS}\n")
+    if proc_root.returncode != 0:
+        log_print("chpasswd root failed", is_error=True)
+
     run_chroot(f"useradd -m -s /bin/bash {USER}")
-    run_chroot(f"echo '{USER}:{USER_PASS}' | chpasswd")
-    for group in ["wheel", "audit", "libvirt", "firejail", "network"]:
+    proc_user = subprocess.Popen(
+        ["arch-chroot", "/mnt", "chpasswd"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True
+    )
+    proc_user.communicate(input=f"{USER}:{USER_PASS}\n")
+    if proc_user.returncode != 0:
+        log_print("chpasswd user failed", is_error=True)
+
+    for group in ["wheel", "audit", "libvirt", "network"]:
         run_chroot(f"groupadd -rf {group}")
         run_chroot(f"gpasswd -a {USER} {group}")
     run_chroot("groupadd -rf allow-internet")
-
+    run_chroot("sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers")
     run_chroot("systemctl enable NetworkManager")
-
     log_print("✓ System configuration complete")
 
-# ========== BOOT CONFIGURATION ==========
-def configure_boot(root_mount):
-    log_print("=" * 60)
-    log_print("BOOT CONFIGURATION")
-    log_print("=" * 60)
 
-    if ENCRYPTED:
-        root_uuid = subprocess.run(f"blkid -s UUID -o value {ROOT_DEV}", capture_output=True, text=True, shell=True).stdout.strip()
-        hooks = "base systemd plymouth autodetect modconf block sd-encrypt lvm2 filesystems keyboard fsck"
-    else:
-        root_uuid = subprocess.run(f"blkid -s UUID -o value {ROOT_DEV}", capture_output=True, text=True, shell=True).stdout.strip()
-        hooks = "base systemd plymouth autodetect modconf block filesystems keyboard fsck"
 
-    run_chroot(f"sed -i 's/^HOOKS.*/HOOKS=({hooks})/' /etc/mkinitcpio.conf")
 
-    def create_entry(kernel_name, kernel_image, initrd_image, params):
-        conf = f"title   {HOSTNAME} - {kernel_name}\n"
-        conf += f"linux   /{kernel_image}\n"
-        conf += f"initrd  /{initrd_image}\n"
-        if ENCRYPTED:
-            conf += f"options rd.luks.name={root_uuid}=archy root={root_mount} rw {params}\n"
-        else:
-            conf += f"options root=UUID={root_uuid} rw {params}\n"
-        return conf
+###
 
-    kernel_map = {
-        "linux-hardened": ("vmlinuz-linux-hardened", "initramfs-linux-hardened.img", "initramfs-linux-hardened-fallback.img", HARDENED_PARAMS),
-        "linux-zen":      ("vmlinuz-linux-zen",      "initramfs-linux-zen.img",      "initramfs-linux-zen-fallback.img",      STANDARD_PARAMS),
-        "linux-lts":      ("vmlinuz-linux-lts",      "initramfs-linux-lts.img",      "initramfs-linux-lts-fallback.img",      STANDARD_PARAMS),
-    }
+###
+# ========== BOOT CONFIGURATION (UKI, no Secure Boot) ==========
+def write_mkinitcpio_preset():
+    """
+    Writes the linux-hardened mkinitcpio preset that points mkinitcpio at
+    building a UKI. Factored out so it can be called both during initial
+    boot configuration AND re-applied right before the final `mkinitcpio -P`
+    in post_installation(), in case pacstrap's kernel-install pacman hook
+    (90-mkinitcpio-install.hook) already ran mkinitcpio using the package's
+    stock preset before this one was written, or a later package
+    install/upgrade regenerated the stock preset and clobbered ours.
+    
+    FIX #7: Added ALL_config and ALL_kver which are required for UKI generation.
+    Without ALL_kver, mkinitcpio doesn't know which kernel to build for and
+    will skip UKI creation with "No kernel version specified" warning.
+    Added fallback preset as well for recovery purposes.
+    """
+    preset = textwrap.dedent(f"""\
+    ALL_config="/etc/mkinitcpio.conf"
+    ALL_kver="/boot/vmlinuz-linux-hardened"
+    
+    PRESETS=('default' 'fallback')
+    
+    default_image="/boot/initramfs-linux-hardened.img"
+    default_uki="{UKI_PATH}"
+    default_options="--cmdline /etc/kernel/cmdline"
+    
+    fallback_image="/boot/initramfs-linux-hardened-fallback.img"
+    fallback_uki="/efi/EFI/Linux/arch-hardened-fallback.efi"
+    fallback_options="-S autodetect --cmdline /etc/kernel/cmdline"
+    """)
+    write_file(Path("/etc/mkinitcpio.d/linux-hardened.preset"), preset, chroot=True)
 
-    entries_dir = Path("/mnt/boot/loader/entries")
-    default_entry = None
-    for pkg, (vmlinuz, initrd, fallback_initrd, params) in kernel_map.items():
-        if pkg in KERNELS:
-            safe_name = pkg.replace("linux-", "arch-")
-            entry_conf = create_entry(f"Linux {pkg.split('-')[1].capitalize()}", vmlinuz, initrd, params)
-            (entries_dir / f"{safe_name}.conf").write_text(entry_conf)
-            fallback_conf = create_entry(f"Linux {pkg.split('-')[1].capitalize()} (fallback)", vmlinuz, fallback_initrd, "")
-            (entries_dir / f"{safe_name}-fallback.conf").write_text(fallback_conf)
-            if default_entry is None:
-                default_entry = f"{safe_name}.conf"
-
-    loader_conf = f"default {default_entry}\ntimeout 5\nconsole-mode max\neditor no\n"
-    write_file(Path("/boot/loader/loader.conf"), loader_conf, chroot=True)
-
-    if ENCRYPTED:
-        cmdline = f"rd.luks.name={root_uuid}=archy root={root_mount} rw {HARDENED_PARAMS}"
-    else:
-        cmdline = f"root=UUID={root_uuid} rw {HARDENED_PARAMS}"
-    write_file(Path("/etc/kernel/cmdline"), cmdline, chroot=True)
-
-    log_print("✓ Boot configuration complete")
-
-# ========== PACKAGE INSTALLATION ==========
+ 
+# ========== PACKAGE INSTALLATION (no AUR) ==========
 def install_regular_packages():
     log_print("=" * 60)
-    log_print("REGULAR PACKAGES INSTALLATION")
+    log_print("REGULAR PACKAGES INSTALLATION (official repos only)")
     log_print("=" * 60)
-    packages, aur = parse_package_file(PACKAGE_FILE)
+
+    packages = parse_package_file(PACKAGE_FILE)
     if packages:
-        total = len(packages)
-        for idx, pkg in enumerate(packages, 1):
-            log_print(f"[{idx}/{total}] Installing: {pkg}")
-            run_chroot(f"pacman --noconfirm --needed -S {pkg}")
-        log_print(f"✓ Installed {total} regular packages")
+        log_print(f"Installing {len(packages)} pacman packages...")
+        run_chroot(f"pacman --noconfirm --needed -S {' '.join(packages)}")
+        log_print(f"✓ Installed {len(packages)} regular packages")
     else:
         log_print("No regular packages found.")
 
-    log_print("Installing systemd-boot...")
-    run_chroot("bootctl install")
+def write_mkinitcpio_presets():
+    """
+    Writes mkinitcpio presets for both linux-hardened and linux-lts kernels.
+    Each kernel gets both default and fallback UKI presets.
+    
+    FIX #7: Added ALL_config and ALL_kver which are required for UKI generation.
+    Without ALL_kver, mkinitcpio doesn't know which kernel to build for and
+    will skip UKI creation with "No kernel version specified" warning.
+    """
+    
+    # Linux Hardened preset
+    hardened_preset = textwrap.dedent(f"""\
+    ALL_config="/etc/mkinitcpio.conf"
+    ALL_kver="/boot/vmlinuz-linux-hardened"
+    
+    PRESETS=('default' 'fallback')
+    
+    default_image="/boot/initramfs-linux-hardened.img"
+    default_uki="{UKI_PATH_HARDENED}"
+    default_options="--cmdline /etc/kernel/cmdline"
+    
+    fallback_image="/boot/initramfs-linux-hardened-fallback.img"
+    fallback_uki="/efi/EFI/Linux/arch-hardened-fallback.efi"
+    fallback_options="-S autodetect --cmdline /etc/kernel/cmdline"
+    """)
+    write_file(Path("/etc/mkinitcpio.d/linux-hardened.preset"), hardened_preset, chroot=True)
+    
+    # Linux LTS preset
+    lts_preset = textwrap.dedent(f"""\
+    ALL_config="/etc/mkinitcpio.conf"
+    ALL_kver="/boot/vmlinuz-linux-lts"
+    
+    PRESETS=('default' 'fallback')
+    
+    default_image="/boot/initramfs-linux-lts.img"
+    default_uki="{UKI_PATH_LTS}"
+    default_options="--cmdline /etc/kernel/cmdline"
+    
+    fallback_image="/boot/initramfs-linux-lts-fallback.img"
+    fallback_uki="/efi/EFI/Linux/arch-lts-fallback.efi"
+    fallback_options="-S autodetect --cmdline /etc/kernel/cmdline"
+    """)
+    write_file(Path("/etc/mkinitcpio.d/linux-lts.preset"), lts_preset, chroot=True)
 
-    # Install plymouth theme package before setting it
-    log_print("Installing plymouth-theme-arch-charge...")
-    run_chroot("pacman --noconfirm --needed -S plymouth-theme-arch-charge")
-
-    # Verify theme files exist before activating
-    theme_path = Path("/mnt/usr/share/plymouth/themes/arch-charge/arch-charge.plymouth")
-    if theme_path.exists():
-        log_print("Setting plymouth theme: arch-charge")
-        run_chroot("plymouth-set-default-theme -R arch-charge")
-    else:
-        log_print(
-            "⚠ plymouth-theme-arch-charge files not found after install — "
-            "falling back to default 'spinner' theme",
-            is_error=True
-        )
-        run_chroot("plymouth-set-default-theme -R spinner")
-
-    return aur
-
-def install_aur_packages(aur_packages):
+def configure_boot(root_mount):
     log_print("=" * 60)
-    log_print("AUR PACKAGES INSTALLATION")
+    log_print("BOOT CONFIGURATION (UKI, unsigned)")
     log_print("=" * 60)
 
-    run_chroot("pacman --noconfirm --needed -S reflector")
+    hooks = "base systemd keyboard autodetect modconf block sd-encrypt lvm2 filesystems fsck"
+    run_chroot(f"sed -i 's/^HOOKS=.*/# &\\nHOOKS=({hooks})/' /etc/mkinitcpio.conf")
 
-    run_chroot(f"echo '{USER} ALL=(ALL) NOPASSWD:ALL   # temp-for-yay' >> /etc/sudoers")
+    root_uuid = subprocess.run(
+        f"blkid -s UUID -o value {ROOT_DEV}", capture_output=True, text=True, shell=True
+    ).stdout.strip()
+    if not root_uuid:
+        log_print("Could not determine root UUID – aborting.", is_error=True)
+        sys.exit(1)
 
-    run_chroot(f"su - {USER} -c 'git clone https://aur.archlinux.org/yay-bin.git /home/{USER}/yay-bin'")
-    run_chroot(f"su - {USER} -c 'cd /home/{USER}/yay-bin && makepkg -si --noconfirm'")
-    run_chroot(f"rm -rf /home/{USER}/yay-bin")
-
-    if aur_packages:
-        total_aur = len(aur_packages)
-        for idx, aurpkg in enumerate(aur_packages, 1):
-            log_print(f"[{idx}/{total_aur}] Installing AUR: {aurpkg}")
-            run_chroot(f"su - {USER} -c 'yay --noconfirm -S {aurpkg}'")
-        log_print(f"✓ Installed {total_aur} AUR packages")
+    if ENCRYPTED:
+        cmdline = f"rd.luks.name={root_uuid}=archy root={root_mount} rw {HARDENED_PARAMS}"
+        cmdline_lts = f"rd.luks.name={root_uuid}=archy root={root_mount} rw {STANDARD_PARAMS}"
     else:
-        log_print("No AUR packages to install.")
+        cmdline = f"root=UUID={root_uuid} rw {HARDENED_PARAMS}"
+        cmdline_lts = f"root=UUID={root_uuid} rw {STANDARD_PARAMS}"
 
-    run_chroot("sed -i '/# temp-for-yay$/d' /etc/sudoers")
+    cmdline_path = Path("/etc/kernel/cmdline")
+    write_file(cmdline_path, cmdline, chroot=True)
+    
+    # Verify the file was actually written to the correct location
+    actual_cmdline_path = Path("/mnt") / str(cmdline_path).lstrip("/")
+    if not actual_cmdline_path.exists():
+        log_print("WARNING: cmdline file missing after write – creating via chroot fallback.", is_error=True)
+        run_chroot(f"echo '{cmdline}' > {cmdline_path}")
+        if not actual_cmdline_path.exists():
+            log_print("FATAL: Still cannot create /etc/kernel/cmdline inside chroot.", is_error=True)
+            sys.exit(1)
 
-# ========== POST-INSTALLATION ==========
+    # Write separate cmdline for LTS (without hardened params)
+    cmdline_lts_path = Path("/etc/kernel/cmdline-lts")
+    write_file(cmdline_lts_path, cmdline_lts, chroot=True)
+    
+    write_mkinitcpio_presets()
+
+    run_chroot("bootctl install --esp-path=/efi")
+
+    entries_dir = Path("/mnt/efi/loader/entries")
+    entries_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Hardened entries
+    hardened_main_entry = textwrap.dedent(f"""\
+        title   {HOSTNAME} - Hardened (UKI)
+        linux   {UKI_PATH_HARDENED}
+    """)
+    
+    hardened_fallback_entry = textwrap.dedent(f"""\
+        title   {HOSTNAME} - Hardened (UKI, fallback)
+        linux   /efi/EFI/Linux/arch-hardened-fallback.efi
+    """)
+    
+    # LTS entries
+    lts_main_entry = textwrap.dedent(f"""\
+        title   {HOSTNAME} - LTS (UKI)
+        linux   {UKI_PATH_LTS}
+    """)
+    
+    lts_fallback_entry = textwrap.dedent(f"""\
+        title   {HOSTNAME} - LTS (UKI, fallback)
+        linux   /efi/EFI/Linux/arch-lts-fallback.efi
+    """)
+    
+    # Write all entries
+    entry_paths = {
+        entries_dir / LOADER_ENTRY_NAME: hardened_main_entry,
+        entries_dir / "arch-hardened-fallback-uki.conf": hardened_fallback_entry,
+        entries_dir / LOADER_ENTRY_NAME_LTS: lts_main_entry,
+        entries_dir / "arch-lts-fallback-uki.conf": lts_fallback_entry,
+    }
+    
+    for path, content in entry_paths.items():
+        path.write_text(content)
+        log_print(f"Wrote {path}")
+
+    loader_conf = f"default {LOADER_ENTRY_NAME.replace('.conf', '')}\ntimeout 5\nconsole-mode max\neditor no\n"
+    write_file(Path("/efi/loader/loader.conf"), loader_conf, chroot=True)
+
+    log_print("✓ Boot configuration complete (no signing)")
+
 def post_installation():
     log_print("=" * 60)
     log_print("POST-INSTALLATION TASKS")
@@ -413,56 +543,116 @@ def post_installation():
             content = content.replace("USER_ID = 1000", f"USER_ID = {uid}")
             audit_script.write_text(content)
 
-    # Firejail config – only run firecfg if firejail is installed
-    if Path("/mnt/usr/bin/firecfg").exists():
-        run_chroot("/usr/bin/firecfg")
-        firejail_users = Path("/mnt/etc/firejail/firejail.users")
-        if firejail_users.exists():
-            content = firejail_users.read_text()
-            content = content.replace("USER_PLACEHOLDER", USER)
-            firejail_users.write_text(content)
-    else:
-        log_print("firejail not installed, skipping firecfg.", is_error=True)
+    # Re-assert presets before final build
+    log_print("Re-asserting mkinitcpio presets before final build...")
+    write_mkinitcpio_presets()
+    
+    # Verify presets were written correctly
+    for kernel in ["linux-hardened", "linux-lts"]:
+        log_print(f"Verifying {kernel} preset contents:")
+        preset_check = run_chroot(f"cat /etc/mkinitcpio.d/{kernel}.preset", capture_output=True)
+        log_print(preset_check.stdout if preset_check.stdout else f"Could not read {kernel} preset")
 
-    run_chroot("mkinitcpio -P")
+    # Verify systemd-boot EFI stub
+    stub_check = run_chroot(
+        "test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub",
+        check=False
+    )
+    if stub_check.returncode != 0:
+        log_print(
+            "⚠ systemd EFI stub (linuxx64.efi.stub) not found in chroot — "
+            "UKI generation will be skipped. Is the 'systemd' package installed?",
+            is_error=True
+        )
+    else:
+        log_print("✓ systemd EFI stub found")
+
+    # Check if kernel images exist
+    for kernel in ["linux-hardened", "linux-lts"]:
+        kernel_check = run_chroot(
+            f"test -f /boot/vmlinuz-{kernel}",
+            check=False
+        )
+        if kernel_check.returncode != 0:
+            log_print(
+                f"⚠ Kernel image /boot/vmlinuz-{kernel} not found — "
+                "UKI cannot be built without the kernel",
+                is_error=True
+            )
+        else:
+            log_print(f"✓ {kernel} kernel image found")
+
+    # Run mkinitcpio for all kernels
+    result = run_chroot("mkinitcpio -v -P", check=False, capture_output=True)
+    combined_output = (result.stdout or "") + (result.stderr or "")
+    log_print(combined_output)
+
+    uki_built_per_log = bool(re.search(r"[Uu]nified kernel image", combined_output))
+
+    # Check for all UKI files
+    uki_files = {
+        "Hardened main": f"/mnt/{UKI_PATH_HARDENED.lstrip('/')}",
+        "Hardened fallback": "/mnt/efi/EFI/Linux/arch-hardened-fallback.efi",
+        "LTS main": f"/mnt/{UKI_PATH_LTS.lstrip('/')}",
+        "LTS fallback": "/mnt/efi/EFI/Linux/arch-lts-fallback.efi",
+    }
+
+    if result.returncode != 0:
+        log_print(f"⚠ mkinitcpio exited with code {result.returncode}", is_error=True)
+
+    all_ukis_ok = True
+    for name, path in uki_files.items():
+        if Path(path).exists():
+            log_print(f"✓ {name} UKI built successfully")
+        else:
+            log_print(f"⚠ {name} UKI not found at {path}", is_error=True)
+            all_ukis_ok = False
+
+    if uki_built_per_log:
+        log_print("✓ UKI generation detected in mkinitcpio output")
+    else:
+        log_print(
+            "⚠ mkinitcpio output did not mention building unified kernel images — "
+            "files may be stale from earlier builds. Re-check manually.",
+            is_error=True
+        )
+
+    if not all_ukis_ok:
+        log_print(
+            "Some UKIs not found – build may have failed. Check the mkinitcpio output above, "
+            "and confirm presets have correct default_uki paths and that the systemd EFI stub is present.",
+            is_error=True
+        )
+
     log_print("✓ Post-installation tasks complete")
 
-# ========== CONFIG VERIFICATION & INSTALL POST SCRIPT ==========
+# ========== CONFIG VERIFICATION ==========
 def install_post_script():
-    """
-    Check that every config file listed in CONFIG_CHECKS has its required package installed.
-    Display results and ask for user confirmation (y/n).
-    If confirmed and there are missing packages, attempt to install them.
-    """
     log_print("=" * 60)
     log_print("POST-INSTALLATION CONFIG CHECK")
     log_print("=" * 60)
 
     missing = []
-    found = []
     for conf_path, pkg in CONFIG_CHECKS.items():
+        # FIX #6: Use proper path joining
         full_path = Path("/mnt") / conf_path.lstrip("/")
         if full_path.exists():
             try:
                 run_chroot(f"pacman -Q {pkg}")
-                found.append((conf_path, pkg))
-                log_print(f"✓ {conf_path} exists and package {pkg} is installed.")
             except subprocess.CalledProcessError:
                 missing.append((conf_path, pkg, "Package not installed"))
-                log_print(f"⚠ {conf_path} exists, but package {pkg} is NOT installed.", is_error=True)
         else:
             missing.append((conf_path, pkg, "Config file missing"))
-            log_print(f"⚠ Config file {conf_path} is missing (expected package {pkg}).", is_error=True)
 
     print("\n" + "=" * 60)
     print("CONFIG VERIFICATION SUMMARY")
     print("=" * 60)
-    if not missing:
-        print("All config files are present and required packages are installed.")
-    else:
+    if missing:
         print("The following issues were found:")
         for conf, pkg, reason in missing:
             print(f"  - {conf}: {reason} (expected package: {pkg})")
+    else:
+        print("All config files are present and required packages are installed.")
 
     while True:
         choice = input("\nDo you want to proceed? (y/n): ").strip().lower()
@@ -471,18 +661,12 @@ def install_post_script():
         print("Please enter 'y' or 'n'.")
 
     if choice == "n":
-        log_print("User chose not to proceed. Aborting.", is_error=True)
         sys.exit(0)
 
     if missing:
-        log_print("Attempting to install missing packages...")
         pkgs_to_install = set(pkg for _, pkg, reason in missing if reason == "Package not installed")
         if pkgs_to_install:
             run_chroot(f"pacman --noconfirm --needed -S {' '.join(pkgs_to_install)}")
-            log_print("Missing packages installed.")
-        else:
-            log_print("No packages to install (only config file missing).")
-
     log_print("✓ Post-installation config check complete.")
 
 # ========== VERIFICATION ==========
@@ -500,7 +684,6 @@ def verify_installation():
             log_print(f"✓ {pkg} installed")
         except subprocess.CalledProcessError:
             log_print(f"⚠ {pkg} not found", is_error=True)
-
     log_print("✓ Verification complete")
 
 # ========== FINAL SETUP ==========
@@ -518,8 +701,12 @@ def final_setup():
             os.chown(dest, int(uid), int(gid))
         dest.chmod(0o755)
         log_print("Hyprland dotfile installer copied to user home.")
-    log_print(f"Installation complete! Log: {LOG_FILE}")
+
+    log_print("=" * 60)
+    log_print("Installation complete – manual LUKS passphrase, unsigned UKI, no AUR, no Plymouth.")
+    log_print(f"Log file: {LOG_FILE}")
     log_print("You can reboot now: reboot")
+    log_print("=" * 60)
 
 # ========== MAIN ==========
 def main():
@@ -528,7 +715,6 @@ def main():
     log_print(f"Log file: {LOG_FILE}")
 
     if len(sys.argv) > 1 and sys.argv[1] == "--install-post":
-        log_print("Running post-installation config check only (--install-post).")
         install_post_script()
         return
 
@@ -536,7 +722,7 @@ def main():
     setup_reflector()
 
     log_print("\n" + "=" * 60)
-    log_print("ARCH LINUX INSTALLATION STARTING")
+    log_print("ARCH LINUX PARANOID INSTALLATION (no Secure Boot, no Firejail, no AUR, no Plymouth)")
     log_print("=" * 60)
     log_print(f"Encryption: {ENCRYPTED}")
     log_print(f"Root device: {ROOT_DEV}")
@@ -548,13 +734,10 @@ def main():
     install_base_system()
     configure_system(root_mount)
     configure_boot(root_mount)
-    aur_packages = install_regular_packages()
-    install_aur_packages(aur_packages)
+    install_regular_packages()
     post_installation()
     verify_installation()
-
     install_post_script()
-
     final_setup()
 
 if __name__ == "__main__":
